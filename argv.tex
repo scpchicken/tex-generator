@@ -1,0 +1,55 @@
+% --- Register Declarations ---
+\newcount\tA \newcount\tB \newcount\tC % Scratch registers
+\newcount\strlen \newcount\charval \newcount\targetidx \newcount\curridx % Helper registers
+
+\newcount\vA % i
+\newcount\vB % len
+\newcount\vC % j
+\newcount\vD % ch
+
+% --- TeX Argv String Parsing Helpers ---
+\def\calcargvlen#1{%
+  \strlen=0
+  \edef\argstr{\argv#1\relax}%
+  \expandafter\countlen\argstr
+}
+\def\countlen#1{\ifx#1\relax\else\advance\strlen 1 \expandafter\countlen\fi}
+
+\def\calcargvchar#1#2{%
+  \targetidx=#2\relax \curridx=0\relax \charval=0\relax
+  \edef\argstr{\argv#1\relax}%
+  \expandafter\findchar\argstr
+}
+\def\findchar#1{%
+  \ifx#1\relax
+  \else
+    \ifnum\curridx=\targetidx\charval=`#1\fi
+    \advance\curridx 1
+    \expandafter\findchar
+  \fi
+}
+
+% --- Program Body ---
+\vA=0 %
+\def\loopA{\tA=\vA \ifnum\tA<\argc%
+\tC=\vA \calcargvlen\tC \vB=\strlen %
+\tA=\vB \the\tA%
+\tA=10 \char\tA%
+\vC=0 %
+\def\loopB{\tA=\vC \tB=\vB \ifnum\tA<\tB%
+\tC=\vA \tA=\vC \calcargvchar\tC\tA \vD=\charval %
+\tA=32 \char\tA%
+\tA=\vD \char\tA%
+\vC=\vC \tC=1 \advance\vC\tC %
+\let\nextB=\loopB%
+\else\let\nextB=\relax\fi%
+\nextB}%
+\loopB%
+\tA=10 \char\tA%
+\tA=10 \char\tA%
+\vA=\vA \tC=1 \advance\vA\tC %
+\let\nextA=\loopA%
+\else\let\nextA=\relax\fi%
+\nextA}%
+\loopA%
+\bye
