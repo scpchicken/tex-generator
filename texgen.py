@@ -28,6 +28,11 @@ class PrintNode:
         self.is_char = is_char
         self.newline = newline
 
+class PrintStringNode:
+    def __init__(self, text: str, newline=False):
+        self.text = text
+        self.newline = newline
+
 class IfNode:
     def __init__(self, cond, true_body, false_body):
         self.cond = cond
@@ -50,6 +55,37 @@ class ArgvLenNode:
     def __init__(self, arg_idx):
         self.arg_idx = arg_idx
 
+# --- ESCAPE SEQUENCE UNESCAPER ---
+
+def unescape_string(s: str) -> str:
+    """Strips quotes and expands escape sequences (\n, \\, \", \t, \r, \0)."""
+    inner = s[1:-1]
+    res = []
+    i = 0
+    n = len(inner)
+    while i < n:
+        if inner[i] == '\\' and i + 1 < n:
+            nxt = inner[i + 1]
+            if nxt == 'n':
+                res.append('\n')
+            elif nxt == 't':
+                res.append('\t')
+            elif nxt == 'r':
+                res.append('\r')
+            elif nxt == '\\':
+                res.append('\\')
+            elif nxt == '"':
+                res.append('"')
+            elif nxt == '0':
+                res.append('\0')
+            else:
+                res.append(nxt)
+            i += 2
+        else:
+            res.append(inner[i])
+            i += 1
+    return "".join(res)
+
 # --- LEXER & PARSER ---
 
 def tokenize(code: str):
@@ -63,6 +99,7 @@ def tokenize(code: str):
         ('PUTC',     r'\bputc\b'),
         ('ARGV_LEN', r'\bargv_len\b'),
         ('ARGV',     r'\bargv\b'),
+        ('STRING',   r'"([^"\\]|\\.)*"'),
         ('COMMA',    r','),
         ('LBRACE',   r'\{'),
         ('RBRACE',   r'\}'),
@@ -93,30 +130,7 @@ def tokenize(code: str):
 
 
 def _insert_automatic_semicolons(tokens):
-    """
-    Makes the trailing ';' after a statement optional when the statement
-    ends at a newline instead. A newline is treated as an implicit ';'
-    only when the preceding token is one that can legally end a statement
-    (a number, identifier, or a closing ')' from a call or condition) --
-    this avoids splitting an expression that simply wraps onto the next
-    line, e.g.:
-        x = i +
-            1;
-    (no token in {INT, IDENT, RPAREN} precedes that newline, so nothing
-    is inserted). As a further safeguard, no ';' is inserted if the next
-    real token is '{', so a brace on its own line still attaches to its
-    'if'/'while', e.g.:
-        while (i < n)
-        {
-            ...
-        }
-    Real ';' tokens and blank lines are left untouched -- this only ever
-    fills in a ';' that would otherwise be missing. End of input is
-    treated the same as a trailing newline, so a final statement with no
-    trailing newline (e.g. a file with no newline at EOF) still gets its
-    implicit ';'.
-    """
-    ASI_TRIGGER_KINDS = {'INT', 'IDENT', 'RPAREN'}
+    ASI_TRIGGER_KINDS = {'INT', 'IDENT', 'RPAREN', 'STRING'}
     result = []
     n = len(tokens)
     for i, (kind, value) in enumerate(tokens):
@@ -185,14 +199,23 @@ class Parser:
         elif kind in ('PRINT', 'PRINTLN', 'PUTC'):
             self.expect(kind)
             self.expect('LPAREN')
-            operand = self.parse_expression()
-            self.expect('RPAREN')
-            self.expect('SEMI')
-            return PrintNode(
-                operand,
-                is_char=(kind == 'PUTC'),
-                newline=(kind == 'PRINTLN')
-            )
+            if self.peek()[0] == 'STRING':
+                _, str_val = self.expect('STRING')
+                self.expect('RPAREN')
+                self.expect('SEMI')
+                return PrintStringNode(
+                    unescape_string(str_val),
+                    newline=(kind == 'PRINTLN')
+                )
+            else:
+                operand = self.parse_expression()
+                self.expect('RPAREN')
+                self.expect('SEMI')
+                return PrintNode(
+                    operand,
+                    is_char=(kind == 'PUTC'),
+                    newline=(kind == 'PRINTLN')
+                )
         elif kind == 'IDENT':
             _, name = self.expect('IDENT')
             self.expect('OP')
@@ -288,8 +311,7 @@ class TexTranspiler:
         ast = Parser(tokens).parse_program()
         
         body_code = self.emit_block(ast)
-        
-        # TeX output requires registers and string-parsing helper macros
+
         tex_code = "% --- Register Declarations ---\n"
         tex_code += "\\newcount\\tA \\newcount\\tB \\newcount\\tC \\newcount\\tD % Scratch registers\n"
         tex_code += "\\newcount\\strlen \\newcount\\charval \\newcount\\targetidx \\newcount\\curridx % Helper registers\n\n"
@@ -326,46 +348,18 @@ class TexTranspiler:
     SCRATCH_POOL = ("\\tA", "\\tB", "\\tC")
 
     def pick_scratch(self, *exclude):
-        """
-        Returns a scratch register from the \\tA/\\tB/\\tC pool that is not
-        in `exclude`. Used anywhere an expression needs a temporary that
-        must not alias a register already holding a live value (e.g. the
-        register the caller wants the result stored in, or another
-        operand's register). A plain "\\tB if x==\\tA else \\tC" ternary
-        only handles two of the three registers correctly -- if x is
-        already \\tC, that ternary hands back \\tC again, silently
-        aliasing it. This picks the first pool member not already spoken
-        for, however many are excluded.
-        """
         for reg in self.SCRATCH_POOL:
             if reg not in exclude:
                 return reg
         raise RuntimeError("no free scratch register available")
 
     def emit_operand(self, node, scratch_reg):
-        """
-        Prepares an operand for use in a TeX numeric context where a
-        register is not strictly required -- e.g. the right-hand side of
-        \\ifnum, \\advance, \\multiply, \\divide, or the argument to \\the
-        / \\char. TeX's <number> scanning happily expands a macro in
-        place, so these contexts don't need the value pre-copied into a
-        scratch register.
-
-        Special-cases a bare reference to `argc`: since \\argc is a macro
-        injected by the harness (not one of this transpiler's own
-        \\newcount registers), copying its value into a scratch register
-        first is unnecessary and, as observed in practice, unreliable.
-        We reference \\argc directly instead.
-
-        Returns (setup_code, token_to_use).
-        """
         if isinstance(node, VarRef) and node.name == "argc":
             return "", "\\argc"
         code = self.emit_eval(node, scratch_reg)
         return code, scratch_reg
 
     def emit_eval(self, node, target_reg="\\tA"):
-        """Evaluates an expression and stores the result in target_reg."""
         if isinstance(node, IntNode):
             return f"{target_reg}={node.val} "
         elif isinstance(node, VarRef):
@@ -386,11 +380,6 @@ class TexTranspiler:
             return code
         elif isinstance(node, BinaryOpNode):
             code = self.emit_eval(node.left, target_reg)
-            
-            # Right operand only needs to be a <number>, not necessarily a
-            # register -- \advance/\multiply/\divide accept either. Use
-            # emit_operand so a bare `argc` is referenced directly instead
-            # of being copied into a scratch register first.
             right_reg = self.pick_scratch(target_reg)
             right_code, right_val = self.emit_operand(node.right, right_reg)
             code += right_code
@@ -404,14 +393,6 @@ class TexTranspiler:
             elif node.op == '/':
                 code += f"\\divide{target_reg}{right_val} "
             elif node.op == '%':
-                # TeX modulo calculation: d = x - (x / y) * y
-                # \tD is a dedicated scratch register used only here. It
-                # must not reuse target_reg or right_val's register: when
-                # target_reg is a user variable (the common top-level
-                # case, e.g. `z = 3 % 2;`), right_val ends up in \tC, and
-                # using \tC again as the modulo scratch would overwrite
-                # the divisor with the dividend before the divide even
-                # happens, corrupting the result.
                 code += f"\\tD={target_reg} \\divide\\tD{right_val} \\multiply\\tD{right_val} \\advance{target_reg}-\\tD "
             return code
 
@@ -430,9 +411,23 @@ class TexTranspiler:
             else:
                 code += f"\\the{val}"
             if node.newline:
-                code += "\\hfill\\break%"
+                code += "\\leavevmode\\par%\n"
             else:
                 code += "%"
+            return code
+
+        elif isinstance(node, PrintStringNode):
+            code = ""
+            for ch in node.text:
+                if ch == '\n':
+                    code += "\\leavevmode\\par%\n"
+                else:
+                    code += f"\\char{ord(ch)} "
+            if node.newline:
+                code += "\\leavevmode\\par%\n"
+            else:
+                if not code.endswith("%") and not code.endswith("\n"):
+                    code += "%"
             return code
             
         elif isinstance(node, IfNode):
@@ -444,10 +439,15 @@ class TexTranspiler:
             
             op = "=" if node.cond.op == "==" else node.cond.op
             code += f"\\ifnum{left_val}{op}{right_val}%\n"
-            code += self.emit_block(node.true_body)
+            true_str = self.emit_block(node.true_body)
+            if true_str:
+                code += true_str + "\n"
             if node.false_body:
-                code += "\n\\else%\n" + self.emit_block(node.false_body)
-            code += "\n\\fi%"
+                code += "\\else%\n"
+                false_str = self.emit_block(node.false_body)
+                if false_str:
+                    code += false_str + "\n"
+            code += "\\fi%"
             return code
             
         elif isinstance(node, WhileNode):
@@ -462,7 +462,9 @@ class TexTranspiler:
             code += left_code
             code += right_code
             code += f"\\ifnum{left_val}{op}{right_val}%\n"
-            code += self.emit_block(node.body)
+            body_str = self.emit_block(node.body)
+            if body_str:
+                code += body_str + "\n"
             code += f"\n\\let{next_macro}={loop_macro}%\n"
             code += f"\\else\\let{next_macro}=\\relax\\fi%\n"
             code += f"{next_macro}}}%\n"
