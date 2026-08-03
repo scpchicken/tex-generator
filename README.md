@@ -2,8 +2,11 @@
 similar to fish-generator but for tex
 
 ```bash
+egg = argc
+println(egg)
+
 # Print length of argument 1
-len = argv_len(1);
+len = arglen(1);
 print(len);
 
 # Loop over each character in argument 1 and output it

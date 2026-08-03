@@ -1,6 +1,6 @@
 i = 0;
 while (i < argc) {
-    len = argv_len(i);
+    len = arglen(i);
     print(len)
     putc(10)
 

@@ -1,0 +1,67 @@
+% --- Register Declarations ---
+\newcount\tA \newcount\tB \newcount\tC \newcount\tD % Scratch registers
+\newcount\strlen \newcount\charval \newcount\targetidx \newcount\curridx % Helper registers
+\newcount\arridx \newcount\arrval % Array helper registers
+
+\newcount\vA % a
+\newcount\vB % b
+\newcount\vC % i
+\newcount\vD % temp
+
+% --- TeX Argv & Array Parsing Helpers ---
+\def\calcarglen#1{%
+  \strlen=0
+  \edef\argstr{\argv#1\relax}%
+  \expandafter\countlen\argstr
+}
+\def\countlen#1{\ifx#1\relax\else\advance\strlen 1 \expandafter\countlen\fi}
+
+\def\calcargvchar#1#2{%
+  \targetidx=#2\relax \curridx=0\relax \charval=0\relax
+  \edef\argstr{\argv#1\relax}%
+  \expandafter\findchar\argstr
+}
+\def\findchar#1{%
+  \ifx#1\relax
+  \else
+    \ifnum\curridx=\targetidx\charval=`#1\fi
+    \advance\curridx 1
+    \expandafter\findchar
+  \fi
+}
+
+\def\setarray#1#2#3{%
+  \expandafter\edef\csname arr@#1:\the#2\endcsname{\the#3}%
+}
+\def\getarray#1#2#3{%
+  \expandafter\ifx\csname arr@#1:\the#2\endcsname\relax
+    #3=0\relax
+  \else
+    #3=\csname arr@#1:\the#2\endcsname\relax
+  \fi
+}
+
+% --- Program Body ---
+\vA=0 %
+\vB=1 %
+\vC=0 %
+
+\def\loopA{\tA=\vC \tB=10 \ifnum\tA<\tB%
+\arridx=\vC \arrval=\vA \setarray{arr}{\arridx}{\arrval}%
+\vD=\vA \tA=\vB \advance\vD\tA %
+\vA=\vB %
+\vB=\vD %
+\vC=\vC \tA=1 \advance\vC\tA %
+\let\nextA=\loopA%
+\else\let\nextA=\relax\fi%
+\nextA}%
+\loopA%
+\def\loopB{\tA=\vC \tB=0 \ifnum\tA>\tB%
+\vC=\vC \tA=1 \advance\vC-\tA %
+\tB=\vC \getarray{arr}{\tB}{\tA}\the\tA\leavevmode\par%
+
+\let\nextB=\loopB%
+\else\let\nextB=\relax\fi%
+\nextB}%
+\loopB%
+\bye

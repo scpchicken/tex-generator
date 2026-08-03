@@ -1,0 +1,58 @@
+% --- Register Declarations ---
+\newcount\tA \newcount\tB \newcount\tC \newcount\tD % Scratch registers
+\newcount\strlen \newcount\charval \newcount\targetidx \newcount\curridx % Helper registers
+\newcount\arridx \newcount\arrval % Array helper registers
+
+\newcount\vA % i
+
+% --- TeX Argv & Array Parsing Helpers ---
+\def\calcarglen#1{%
+  \strlen=0
+  \edef\argstr{\argv#1\relax}%
+  \expandafter\countlen\argstr
+}
+\def\countlen#1{\ifx#1\relax\else\advance\strlen 1 \expandafter\countlen\fi}
+
+\def\calcargvchar#1#2{%
+  \targetidx=#2\relax \curridx=0\relax \charval=0\relax
+  \edef\argstr{\argv#1\relax}%
+  \expandafter\findchar\argstr
+}
+\def\findchar#1{%
+  \ifx#1\relax
+  \else
+    \ifnum\curridx=\targetidx\charval=`#1\fi
+    \advance\curridx 1
+    \expandafter\findchar
+  \fi
+}
+
+\def\setarray#1#2#3{%
+  \expandafter\edef\csname arr@#1:\the#2\endcsname{\the#3}%
+}
+\def\getarray#1#2#3{%
+  \expandafter\ifx\csname arr@#1:\the#2\endcsname\relax
+    #3=0\relax
+  \else
+    #3=\csname arr@#1:\the#2\endcsname\relax
+  \fi
+}
+
+% --- Program Body ---
+\arridx=0 \arrval=104 \setarray{bruh}{\arridx}{\arrval}%
+\arridx=1 \arrval=101 \setarray{bruh}{\arridx}{\arrval}%
+\arridx=2 \arrval=108 \setarray{bruh}{\arridx}{\arrval}%
+\arridx=3 \arrval=108 \setarray{bruh}{\arridx}{\arrval}%
+\arridx=4 \arrval=111 \setarray{bruh}{\arridx}{\arrval}%
+\arridx=5 \arrval=54 \setarray{bruh}{\arridx}{\arrval}%
+\arridx=6 \arrval=55 \setarray{bruh}{\arridx}{\arrval}%
+\arridx=0 \arrval=106 \setarray{bruh}{\arridx}{\arrval}%
+\vA=0 %
+\def\loopA{\tA=\vA \tB=7 \ifnum\tA<\tB%
+\tB=\vA \getarray{bruh}{\tB}{\tA}\char\tA%
+\vA=\vA \tA=1 \advance\vA\tA %
+\let\nextA=\loopA%
+\else\let\nextA=\relax\fi%
+\nextA}%
+\loopA%
+\bye
