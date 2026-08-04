@@ -455,7 +455,8 @@ def optimize_macros(raw_tex: str) -> str:
 # --- OPTIMIZED TEX TRANSPILER ---
 
 class TexTranspiler:
-    SCRATCH_POOL = ("\\a", "\\b", "\\c")
+    # Default 10 scratch registers available
+    SCRATCH_POOL = ("\\a", "\\b", "\\c", "\\d", "\\e", "\\f", "\\g", "\\h", "\\i", "\\j")
 
     # TeX \ifnum supports '=', '<', and '>'. 
     # Invert branches for '!=', '<=', and '>='.
@@ -474,6 +475,7 @@ class TexTranspiler:
         self.used_macro_names = {chr(c) for c in range(ord('a'), ord('j') + 1)}
         self.used_macro_names.update({'P', 'S', 'G', 'L', 'K', 'V', 'F', 'X'})
         self.name_gen = self._name_generator()
+        self.used_scratch_regs = set()
 
     def _name_generator(self):
         for c in string.ascii_lowercase + string.ascii_uppercase:
@@ -497,12 +499,22 @@ class TexTranspiler:
         self.used_macro_names.add(loop_name[1:])
         return loop_name
 
+    def pick_scratch(self, busy_regs=()):
+        for reg in self.SCRATCH_POOL:
+            if reg not in busy_regs:
+                self.used_scratch_regs.add(reg)
+                return reg
+        raise RuntimeError("no free scratch register available")
+
     def transpile(self, code: str) -> str:
         tokens = tokenize(code)
         ast = Parser(tokens).parse_program()
         body_code = self.emit_block(ast)
 
-        regs = "\\newcount\\a\\newcount\\b\\newcount\\c\\newcount\\d\\newcount\\e\\newcount\\f\\newcount\\g\\newcount\\h\\newcount\\i\\newcount\\j"
+        # Only allocate scratch registers that were actually used
+        ordered_scratch = [reg for reg in self.SCRATCH_POOL if reg in self.used_scratch_regs]
+        regs = "".join(f"\\newcount{reg}" for reg in ordered_scratch)
+
         for user_var, tex_var in self.vars.items():
             regs += f"\\newcount{tex_var}"
 
@@ -519,12 +531,6 @@ class TexTranspiler:
         raw_tex = f"{regs}{helpers}{body_code}\\bye"
         return optimize_macros(raw_tex)
 
-    def pick_scratch(self, busy_regs=()):
-        for reg in self.SCRATCH_POOL:
-            if reg not in busy_regs:
-                return reg
-        raise RuntimeError("no free scratch register available")
-
     def emit_operand(self, node, scratch_reg, busy_regs=()):
         if isinstance(node, VarRef) and node.name == "argc":
             return "", "\\argc"
@@ -532,6 +538,7 @@ class TexTranspiler:
         return code, scratch_reg
 
     def emit_eval(self, node, target_reg="\\a", busy_regs=()):
+        self.used_scratch_regs.add(target_reg)
         current_busy = set(busy_regs) | {target_reg}
         if isinstance(node, IntNode):
             return f"{target_reg}{node.val} "
@@ -543,11 +550,13 @@ class TexTranspiler:
             code += f"\\G{{{node.name}}}{{{idx_reg}}}{{{target_reg}}}"
             return code
         elif isinstance(node, ArgLenNode):
+            self.used_scratch_regs.add("\\e")
             arg_reg = self.pick_scratch(current_busy)
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
             code += f"\\L{{{arg_reg}}}{target_reg}\\e "
             return code
         elif isinstance(node, ArgvCharNode):
+            self.used_scratch_regs.update({"\\f", "\\g", "\\h"})
             arg_reg = self.pick_scratch(current_busy)
             char_reg = self.pick_scratch(current_busy | {arg_reg})
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
@@ -556,8 +565,15 @@ class TexTranspiler:
             return code
         elif isinstance(node, BinaryOpNode):
             code = self.emit_eval(node.left, target_reg, busy_regs)
-            right_reg = self.pick_scratch(current_busy)
-            right_code, right_val = self.emit_operand(node.right, right_reg, current_busy)
+            
+            if node.op == '%':
+                self.used_scratch_regs.add("\\d")
+                busy_for_right = current_busy | {"\\d"}
+            else:
+                busy_for_right = current_busy
+
+            right_reg = self.pick_scratch(busy_for_right)
+            right_code, right_val = self.emit_operand(node.right, right_reg, busy_for_right)
             code += right_code
             
             if node.op == '+':
@@ -581,22 +597,25 @@ class TexTranspiler:
             return self.emit_eval(node.rhs, tex_var)
 
         elif isinstance(node, ArrayAssignNode):
+            self.used_scratch_regs.update({"\\i", "\\j"})
             code = self.emit_eval(node.index, "\\i")
-            code += self.emit_eval(node.rhs, "\\j")
+            code += self.emit_eval(node.rhs, "\\j", busy_regs={"\\i"})
             code += f"\\S{{{node.name}}}{{\\i}}{{\\j}}"
             return code
 
         elif isinstance(node, ArrayLiteralAssignNode):
+            self.used_scratch_regs.update({"\\i", "\\j"})
             code_parts = []
             for i, elem in enumerate(node.elements):
                 code = f"\\i{i} "
-                code += self.emit_eval(elem, "\\j")
+                code += self.emit_eval(elem, "\\j", busy_regs={"\\i"})
                 code += f"\\S{{{node.name}}}{{\\i}}{{\\j}}"
                 code_parts.append(code)
             return "".join(code_parts)
 
         elif isinstance(node, PrintNode):
-            code, val = self.emit_operand(node.operand, "\\a")
+            reg = self.pick_scratch()
+            code, val = self.emit_operand(node.operand, reg)
             if node.is_char:
                 code += f"\\char{val} "
             else:
@@ -622,9 +641,9 @@ class TexTranspiler:
             return "".join(res)
 
         elif isinstance(node, IfNode):
-            left_reg = "\\a"
-            right_reg = "\\b"
-            left_code, left_val = self.emit_operand(node.cond.left, left_reg)
+            left_reg = self.pick_scratch()
+            right_reg = self.pick_scratch({left_reg})
+            left_code, left_val = self.emit_operand(node.cond.left, left_reg, {left_reg, right_reg})
             right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
             
             tex_op, inverted = self.OP_MAP[node.cond.op]
@@ -644,10 +663,10 @@ class TexTranspiler:
 
         elif isinstance(node, WhileNode):
             loop_macro = self.get_loop_name()
-            left_reg = "\\a"
-            right_reg = "\\b"
+            left_reg = self.pick_scratch()
+            right_reg = self.pick_scratch({left_reg})
             tex_op, inverted = self.OP_MAP[node.cond.op]
-            left_code, left_val = self.emit_operand(node.cond.left, left_reg)
+            left_code, left_val = self.emit_operand(node.cond.left, left_reg, {left_reg, right_reg})
             right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
             cond_code = left_code + right_code
             body_str = self.emit_block(node.body)
