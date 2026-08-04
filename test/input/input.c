@@ -1,12 +1,12 @@
 i = 0;
-while (i < argc) {
+while i < argc {
     len = arglen(i);
     print(len)
     putc(10)
 
     # Loop over each character in argument 1 and output it
     j = 0;
-    while (j < len) {
+    while j < len {
         ch = argv(i, j);
         println(ch);
         j = j + 1;

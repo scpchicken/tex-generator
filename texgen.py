@@ -12,6 +12,11 @@ class IntNode:
     def __init__(self, val):
         self.val = int(val)
 
+class UnaryOpNode:
+    def __init__(self, op: str, operand):
+        self.op = op
+        self.operand = operand
+
 class BinaryOpNode:
     def __init__(self, left, op: str, right):
         self.left = left
@@ -142,6 +147,7 @@ def tokenize(code: str):
 
 def _insert_automatic_semicolons(tokens):
     ASI_TRIGGER_KINDS = {'INT', 'IDENT', 'RPAREN', 'STRING', 'CHAR', 'RBRACK'}
+    STATEMENT_START_OR_END_KINDS = {'WHILE', 'IF', 'PRINT', 'PRINTLN', 'PUTC', 'IDENT', 'RBRACE'}
     result = []
     n = len(tokens)
     for i, (kind, value) in enumerate(tokens):
@@ -154,7 +160,14 @@ def _insert_automatic_semicolons(tokens):
                 if next_kind != 'LBRACE':
                     result.append(('SEMI', ';'))
             continue
+        
+        # Trigger ASI before closing braces '}' or adjacent statements on the same line
+        if kind in STATEMENT_START_OR_END_KINDS:
+            if result and result[-1][0] in ASI_TRIGGER_KINDS:
+                result.append(('SEMI', ';'))
+                
         result.append((kind, value))
+        
     if result and result[-1][0] in ASI_TRIGGER_KINDS:
         result.append(('SEMI', ';'))
     return result
@@ -291,12 +304,24 @@ class Parser:
         return node
 
     def parse_multiplicative(self):
-        node = self.parse_primary()
+        node = self.parse_unary()
         while self.peek()[0] == 'MUL_OP':
             _, op = self.match('MUL_OP')
-            right = self.parse_primary()
+            right = self.parse_unary()
             node = BinaryOpNode(node, op, right)
         return node
+
+    def parse_unary(self):
+        if self.peek()[0] == 'ADD_OP':
+            _, op = self.match('ADD_OP')
+            operand = self.parse_unary()
+            if op == '-':
+                if isinstance(operand, IntNode):
+                    return IntNode(-operand.val)
+                return UnaryOpNode('-', operand)
+            elif op == '+':
+                return operand
+        return self.parse_primary()
 
     def parse_primary(self):
         k, val = self.peek()
@@ -455,11 +480,9 @@ def optimize_macros(raw_tex: str) -> str:
 # --- OPTIMIZED TEX TRANSPILER ---
 
 class TexTranspiler:
-    # Default 10 scratch registers available
+    # 10 Scratch registers available (\a through \j)
     SCRATCH_POOL = ("\\a", "\\b", "\\c", "\\d", "\\e", "\\f", "\\g", "\\h", "\\i", "\\j")
 
-    # TeX \ifnum supports '=', '<', and '>'. 
-    # Invert branches for '!=', '<=', and '>='.
     OP_MAP = {
         '==': ('=', False),
         '=':  ('=', False),
@@ -472,32 +495,43 @@ class TexTranspiler:
 
     def __init__(self):
         self.vars = {}
-        self.used_macro_names = {chr(c) for c in range(ord('a'), ord('j') + 1)}
-        self.used_macro_names.update({'P', 'S', 'G', 'L', 'K', 'V', 'F', 'X'})
-        self.name_gen = self._name_generator()
+        self.array_tags = {}
+        self.array_tag_counter = 0
+        self.var_gen = self._var_name_generator()
+        self.loop_gen = self._loop_name_generator()
         self.used_scratch_regs = set()
 
-    def _name_generator(self):
+    def _var_name_generator(self):
         for c in string.ascii_lowercase + string.ascii_uppercase:
-            if c not in self.used_macro_names:
-                yield f"\\{c}"
+            yield f"\\v{c}"
         for c1 in string.ascii_lowercase + string.ascii_uppercase:
             for c2 in string.ascii_lowercase + string.ascii_uppercase:
-                yield f"\\{c1}{c2}"
+                yield f"\\v{c1}{c2}"
+
+    def _loop_name_generator(self):
+        for c in string.ascii_lowercase + string.ascii_uppercase:
+            yield f"\\l{c}"
+        for c1 in string.ascii_lowercase + string.ascii_uppercase:
+            for c2 in string.ascii_lowercase + string.ascii_uppercase:
+                yield f"\\l{c1}{c2}"
+
+    def get_array_tag(self, name: str) -> str:
+        if name not in self.array_tags:
+            tag = chr(ord('a') + self.array_tag_counter)
+            self.array_tag_counter += 1
+            self.array_tags[name] = tag
+        return self.array_tags[name]
 
     def get_var(self, name):
         if name == "argc":
             return "\\argc"
         if name not in self.vars:
-            var_name = next(self.name_gen)
+            var_name = next(self.var_gen)
             self.vars[name] = var_name
-            self.used_macro_names.add(var_name[1:])
         return self.vars[name]
 
     def get_loop_name(self):
-        loop_name = next(self.name_gen)
-        self.used_macro_names.add(loop_name[1:])
-        return loop_name
+        return next(self.loop_gen)
 
     def pick_scratch(self, busy_regs=()):
         for reg in self.SCRATCH_POOL:
@@ -511,7 +545,6 @@ class TexTranspiler:
         ast = Parser(tokens).parse_program()
         body_code = self.emit_block(ast)
 
-        # Only allocate scratch registers that were actually used
         ordered_scratch = [reg for reg in self.SCRATCH_POOL if reg in self.used_scratch_regs]
         regs = "".join(f"\\newcount{reg}" for reg in ordered_scratch)
 
@@ -519,16 +552,16 @@ class TexTranspiler:
             regs += f"\\newcount{tex_var}"
 
         helpers = (
-            "\\def\\P{\\leavevmode\\par}"
-            "\\def\\S#1#2#3{\\expandafter\\edef\\csname#1:\\the#2\\endcsname{\\the#3}}"
-            "\\def\\G#1#2#3{\\expandafter\\ifx\\csname#1:\\the#2\\endcsname\\relax#30 \\else#3\\csname#1:\\the#2\\endcsname\\fi}"
-            "\\def\\L#1{\\e0 \\edef\\X{\\argv#1\\relax}\\expandafter\\K\\X}"
-            "\\def\\K#1{\\ifx#1\\relax\\else\\advance\\e1 \\expandafter\\K\\fi}"
-            "\\def\\V#1#2{\\g#2\\h0 \\f0 \\edef\\X{\\argv#1\\relax}\\expandafter\\F\\X}"
-            "\\def\\F#1{\\ifx#1\\relax\\else\\ifnum\\h=\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\F\\fi}"
+            "\\def\\HP{\\leavevmode\\par}"
+            "\\def\\HS#1#2#3{\\expandafter\\edef\\csname#1:\\the#2\\endcsname{\\the#3}}"
+            "\\def\\HG#1#2#3{\\expandafter\\ifx\\csname#1:\\the#2\\endcsname\\relax#30 \\else#3\\csname#1:\\the#2\\endcsname\\fi}"
+            "\\def\\HL#1{\\e0 \\edef\\HX{\\argv#1\\relax}\\expandafter\\HK\\HX}"
+            "\\def\\HK#1{\\ifx#1\\relax\\else\\advance\\e1 \\expandafter\\HK\\fi}"
+            "\\def\\HV#1#2{\\g#2\\h0 \\f0 \\edef\\HX{\\argv#1\\relax}\\expandafter\\HF\\HX}"
+            "\\def\\HF#1{\\ifx#1\\relax\\else\\ifnum\\h=\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\HF\\fi}"
         )
 
-        raw_tex = f"{regs}{helpers}{body_code}\\bye"
+        raw_tex = f"{regs}{helpers}{body_code}"
         return optimize_macros(raw_tex)
 
     def emit_operand(self, node, scratch_reg, busy_regs=()):
@@ -542,18 +575,24 @@ class TexTranspiler:
         current_busy = set(busy_regs) | {target_reg}
         if isinstance(node, IntNode):
             return f"{target_reg}{node.val} "
+        elif isinstance(node, UnaryOpNode):
+            if node.op == '-':
+                code = self.emit_eval(node.operand, target_reg, busy_regs)
+                code += f"\\multiply{target_reg}-1 "
+                return code
         elif isinstance(node, VarRef):
             return f"{target_reg}{self.get_var(node.name)} "
         elif isinstance(node, ArrayAccessNode):
             idx_reg = self.pick_scratch(current_busy)
             code = self.emit_eval(node.index, idx_reg, current_busy)
-            code += f"\\G{{{node.name}}}{{{idx_reg}}}{{{target_reg}}}"
+            tag = self.get_array_tag(node.name)
+            code += f"\\HG{{{tag}}}{{{idx_reg}}}{{{target_reg}}}"
             return code
         elif isinstance(node, ArgLenNode):
             self.used_scratch_regs.add("\\e")
             arg_reg = self.pick_scratch(current_busy)
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
-            code += f"\\L{{{arg_reg}}}{target_reg}\\e "
+            code += f"\\HL{{{arg_reg}}}{target_reg}\\e "
             return code
         elif isinstance(node, ArgvCharNode):
             self.used_scratch_regs.update({"\\f", "\\g", "\\h"})
@@ -561,7 +600,7 @@ class TexTranspiler:
             char_reg = self.pick_scratch(current_busy | {arg_reg})
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
             code += self.emit_eval(node.char_idx, char_reg, current_busy | {arg_reg})
-            code += f"\\V{{{arg_reg}}}{{{char_reg}}}{target_reg}\\f "
+            code += f"\\HV{{{arg_reg}}}{{{char_reg}}}{target_reg}\\f "
             return code
         elif isinstance(node, BinaryOpNode):
             code = self.emit_eval(node.left, target_reg, busy_regs)
@@ -600,16 +639,18 @@ class TexTranspiler:
             self.used_scratch_regs.update({"\\i", "\\j"})
             code = self.emit_eval(node.index, "\\i")
             code += self.emit_eval(node.rhs, "\\j", busy_regs={"\\i"})
-            code += f"\\S{{{node.name}}}{{\\i}}{{\\j}}"
+            tag = self.get_array_tag(node.name)
+            code += f"\\HS{{{tag}}}{{\\i}}{{\\j}}"
             return code
 
         elif isinstance(node, ArrayLiteralAssignNode):
             self.used_scratch_regs.update({"\\i", "\\j"})
             code_parts = []
+            tag = self.get_array_tag(node.name)
             for i, elem in enumerate(node.elements):
                 code = f"\\i{i} "
                 code += self.emit_eval(elem, "\\j", busy_regs={"\\i"})
-                code += f"\\S{{{node.name}}}{{\\i}}{{\\j}}"
+                code += f"\\HS{{{tag}}}{{\\i}}{{\\j}}"
                 code_parts.append(code)
             return "".join(code_parts)
 
@@ -621,7 +662,7 @@ class TexTranspiler:
             else:
                 code += f"\\the{val} "
             if node.newline:
-                code += "\\P "
+                code += "\\HP "
             return code
 
         elif isinstance(node, PrintStringNode):
@@ -629,7 +670,7 @@ class TexTranspiler:
             res = []
             for ch in node.text:
                 if ch == '\n':
-                    res.append("\\P ")
+                    res.append("\\HP ")
                 elif ch == ' ':
                     res.append("\\ ")
                 elif ch in TEX_SPECIALS:
@@ -637,7 +678,7 @@ class TexTranspiler:
                 else:
                     res.append(ch)
             if node.newline:
-                res.append("\\P ")
+                res.append("\\HP ")
             return "".join(res)
 
         elif isinstance(node, IfNode):

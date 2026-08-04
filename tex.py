@@ -1,0 +1,1 @@
+print("i dont have a tex interpreter")

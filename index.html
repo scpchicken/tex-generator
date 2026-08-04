@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TeX Generator</title>
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16x16.png">
+  <link rel="shortcut icon" type="image/x-icon" href="icons/favicon.ico">
+  <link rel="manifest" href="icons/site.webmanifest">
+  <!-- Pyodide CDN -->
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 20px;
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    h1 {
+      margin-bottom: 5px;
+      color: #f8fafc;
+    }
+    #status {
+      font-weight: bold;
+      color: #f59e0b;
+      margin-bottom: 15px;
+    }
+
+    /* Top Controls Bar */
+    .controls-bar {
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      margin-bottom: 20px;
+      background-color: #1e293b;
+      padding: 12px 16px;
+      border: 1px solid #334155;
+      border-radius: 8px;
+    }
+    .controls-bar label {
+      font-weight: bold;
+      color: #cbd5e1;
+    }
+    select {
+      background-color: #0f172a;
+      color: #f8fafc;
+      border: 1px solid #334155;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    select:focus {
+      outline: 2px solid #3b82f6;
+    }
+
+    /* Main Grid Layout */
+    .container {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    .box {
+      flex: 1;
+      min-width: 300px;
+      display: flex;
+      flex-direction: column;
+    }
+    label {
+      font-weight: bold;
+      margin-bottom: 8px;
+      color: #cbd5e1;
+    }
+    textarea {
+      width: 100%;
+      height: 380px;
+      font-family: 'Fira Code', 'Consolas', monospace;
+      font-size: 14px;
+      line-height: 1.5;
+      padding: 12px;
+      background-color: #1e293b;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      resize: vertical;
+    }
+    textarea:focus {
+      outline: 2px solid #3b82f6;
+      border-color: transparent;
+    }
+
+    /* Arguments Section */
+    .args-section {
+      margin-top: 20px;
+      background-color: #1e293b;
+      padding: 16px;
+      border: 1px solid #334155;
+      border-radius: 8px;
+    }
+    .args-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .args-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .arg-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .arg-input {
+      flex: 1;
+      height: 90px;
+      background-color: #0f172a;
+      color: #f8fafc;
+      border: 1px solid #334155;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-family: 'Fira Code', 'Consolas', monospace;
+      font-size: 14px;
+      line-height: 1.4;
+      resize: vertical;
+    }
+    .arg-input:focus {
+      outline: 2px solid #3b82f6;
+      border-color: transparent;
+    }
+
+    /* Action Buttons Bar */
+    .actions-bar {
+      display: flex;
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    /* Output Section */
+    .output-section {
+      margin-top: 20px;
+    }
+    .output-section textarea {
+      height: 160px;
+      background-color: #020617;
+      color: #38bdf8;
+    }
+
+    /* Buttons */
+    button {
+      padding: 8px 16px;
+      font-size: 14px;
+      font-weight: bold;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    .btn-primary {
+      padding: 10px 20px;
+      font-size: 16px;
+      background-color: #2563eb;
+      color: white;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background-color: #1d4ed8;
+    }
+    .btn-run {
+      padding: 10px 20px;
+      font-size: 16px;
+      background-color: #10b981;
+      color: white;
+    }
+    .btn-run:hover:not(:disabled) {
+      background-color: #059669;
+    }
+    button:disabled {
+      background-color: #334155 !important;
+      color: #64748b !important;
+      cursor: not-allowed;
+    }
+    .btn-add {
+      background-color: #059669;
+      color: white;
+    }
+    .btn-add:hover {
+      background-color: #047857;
+    }
+    .btn-remove {
+      background-color: #dc2626;
+      color: white;
+      padding: 8px 12px;
+    }
+    .btn-remove:hover {
+      background-color: #b91c1c;
+    }
+
+    /* Loading Overlay & Blur */
+    .overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(15, 23, 42, 0.5);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      color: #f8fafc;
+    }
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 5px solid #334155;
+      border-top: 5px solid #3b82f6;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 16px;
+    }
+    .overlay-text {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    /* Footer */
+    footer {
+      margin-top: 40px;
+      padding: 20px 0;
+      text-align: center;
+      border-top: 1px solid #334155;
+      color: #94a3b8;
+      font-size: 14px;
+    }
+    footer a {
+      color: #3b82f6;
+      text-decoration: none;
+      font-weight: bold;
+    }
+    footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay" class="overlay">
+    <div class="spinner"></div>
+    <div id="overlayText" class="overlay-text">Running code...</div>
+  </div>
+
+  <h1>TeX Generator Web</h1>
+  <div id="status">Loading Python runtime (Pyodide)...</div>
+
+  <!-- Examples Selection Bar -->
+  <div class="controls-bar">
+    <label for="exampleSelect">Select Example:</label>
+    <select id="exampleSelect" onchange="onExampleChange()">
+      <option value="test/tutorial/tutorial.c">test/tutorial/tutorial.c</option>
+    </select>
+  </div>
+
+  <!-- Main Code Container -->
+  <div class="container">
+    <div class="box">
+      <label for="inputCode">Source Code (.c / .src):</label>
+      <textarea id="inputCode" placeholder="Type or select C-like code..."></textarea>
+    </div>
+
+    <div class="box">
+      <label for="outputCode">Generated TeX (.tex) Code:</label>
+      <textarea id="outputCode" readonly placeholder="Transpiled TeX code will appear here..."></textarea>
+    </div>
+  </div>
+
+  <!-- Program Arguments UI -->
+  <div class="args-section">
+    <div class="args-header">
+      <label>Input Arguments (.i file inputs):</label>
+      <button type="button" class="btn-add" onclick="addArgument('')">+ Add Argument</button>
+    </div>
+    <div id="argsContainer" class="args-list"></div>
+  </div>
+
+  <!-- Action Buttons -->
+  <div class="actions-bar">
+    <button id="transpileBtn" class="btn-primary" disabled onclick="runTranspiler()">Transpile</button>
+    <button id="runBtn" class="btn-run" disabled onclick="runTexCode()">▶ Run Code</button>
+  </div>
+
+  <!-- Execution Output -->
+  <div class="output-section">
+    <label for="executionOutput">Execution Output:</label>
+    <textarea id="executionOutput" readonly placeholder="Interpreter output will appear here after clicking 'Run Code'..."></textarea>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    View source on <a id="githubLink" href="https://github.com" target="_blank" rel="noopener noreferrer">GitHub</a>
+  </footer>
+
+  <script>
+    let pyodide;
+
+    function showLoading(text = "Running...") {
+      const overlay = document.getElementById("loadingOverlay");
+      document.getElementById("overlayText").innerText = text;
+      overlay.style.display = "flex";
+    }
+
+    function hideLoading() {
+      document.getElementById("loadingOverlay").style.display = "none";
+    }
+
+    async function initPyodide() {
+      const statusEl = document.getElementById("status");
+      const transpileBtn = document.getElementById("transpileBtn");
+      const runBtn = document.getElementById("runBtn");
+
+      try {
+        showLoading("Loading Python Runtime (Pyodide)...");
+        await new Promise(r => setTimeout(r, 50));
+
+        // Initialize Pyodide WASM environment
+        pyodide = await loadPyodide({
+          indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/"
+        });
+
+        // 1. Fetch texgen.py from root repository folder
+        const tgResponse = await fetch('texgen.py');
+        if (!tgResponse.ok) {
+          throw new Error("Could not find texgen.py in repository.");
+        }
+        const texgenSource = await tgResponse.text();
+        pyodide.globals.set("texgen_source_code", texgenSource);
+
+        // 2. Fetch tex.py (interpreter/runner script) if available
+        const texResponse = await fetch('tex.py');
+        if (!texResponse.ok) {
+          console.warn("Could not find tex.py in repository. 'Run Code' may fail if no interpreter is available.");
+        } else {
+          const texSource = await texResponse.text();
+          pyodide.globals.set("tex_source_code", texSource);
+        }
+
+        // Execute texgen script in Pyodide
+        pyodide.runPython(`
+mod_globals = {'__name__': 'texgen'}
+exec(texgen_source_code, mod_globals)
+TexTranspiler = mod_globals['TexTranspiler']
+        `);
+
+        statusEl.innerText = "Pyodide Ready!";
+        statusEl.style.color = "#22c55e";
+        transpileBtn.disabled = false;
+        runBtn.disabled = false;
+
+        // Load example list and set default example
+        await discoverExamples();
+        await loadExample("test/tutorial/tutorial.c");
+
+      } catch (err) {
+        statusEl.innerText = "Initialization Failed: " + err.message;
+        statusEl.style.color = "#ef4444";
+        console.error(err);
+      } finally {
+        hideLoading();
+      }
+    }
+
+    /* --- ARGUMENT MANAGEMENT --- */
+
+    function addArgument(value = '') {
+      const container = document.getElementById("argsContainer");
+      
+      const row = document.createElement("div");
+      row.className = "arg-row";
+
+      const textarea = document.createElement("textarea");
+      textarea.className = "arg-input";
+      textarea.value = value;
+      textarea.placeholder = "Enter argument / stdin input...";
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "btn-remove";
+      removeBtn.innerText = "×";
+      removeBtn.onclick = () => row.remove();
+
+      row.appendChild(textarea);
+      row.appendChild(removeBtn);
+      container.appendChild(row);
+    }
+
+    function clearArguments() {
+      document.getElementById("argsContainer").innerHTML = "";
+    }
+
+    function getArguments() {
+      const inputs = document.querySelectorAll(".arg-input");
+      return Array.from(inputs).map(input => input.value);
+    }
+
+    /* --- EXAMPLE & FILE LOADING --- */
+
+    async function discoverExamples() {
+      const select = document.getElementById("exampleSelect");
+      const githubLink = document.getElementById("githubLink");
+      let exampleFiles = ["test/tutorial/tutorial.c"];
+
+      try {
+        const hostname = window.location.hostname;
+        const pathParts = window.location.pathname.split('/').filter(Boolean);
+
+        if (hostname.endsWith(".github.io") && pathParts.length > 0) {
+          const owner = hostname.split('.')[0];
+          const repo = pathParts[0];
+
+          githubLink.href = `https://github.com/${owner}/${repo}`;
+
+          async function fetchTree(dirPath) {
+            const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${dirPath}`;
+            const res = await fetch(apiUrl);
+            if (!res.ok) return [];
+            
+            const items = await res.json();
+            let files = [];
+            for (const item of items) {
+              if (item.type === "file" && (item.name.endsWith(".c") || item.name.endsWith(".src"))) {
+                files.push(item.path);
+              } else if (item.type === "dir") {
+                const subFiles = await fetchTree(item.path);
+                files = files.concat(subFiles);
+              }
+            }
+            return files;
+          }
+
+          const githubFiles = await fetchTree("test");
+          if (githubFiles.length > 0) {
+            exampleFiles = githubFiles;
+          }
+        }
+      } catch (e) {
+        console.warn("Could not discover examples automatically via GitHub API:", e);
+      }
+
+      // Populate dropdown options
+      select.innerHTML = "";
+      exampleFiles.sort().forEach(filePath => {
+        const option = document.createElement("option");
+        option.value = filePath;
+        option.innerText = filePath;
+        select.appendChild(option);
+      });
+
+      if (exampleFiles.includes("test/tutorial/tutorial.c")) {
+        select.value = "test/tutorial/tutorial.c";
+      }
+    }
+
+    async function loadExample(cFilePath) {
+      const inputEl = document.getElementById("inputCode");
+
+      try {
+        // 1. Fetch source code
+        const cRes = await fetch(cFilePath);
+        if (cRes.ok) {
+          inputEl.value = await cRes.text();
+          await runTranspiler();
+        } else {
+          inputEl.value = `// Failed to load ${cFilePath}`;
+        }
+
+        // 2. Fetch corresponding .i input arguments file
+        clearArguments();
+        const iFilePath = cFilePath.replace(/\.(c|src)$/, '.i');
+        const iRes = await fetch(iFilePath);
+
+        if (iRes.ok) {
+          const iText = await iRes.text();
+          const rawArgs = iText.replace(/\r\n/g, "\n").split("\n\n");
+          const parsedArgs = rawArgs.map(arg => arg.trim()).filter(arg => arg !== "");
+          
+          parsedArgs.forEach(argVal => addArgument(argVal));
+        }
+      } catch (err) {
+        console.error("Error loading example:", err);
+      }
+    }
+
+    function onExampleChange() {
+      const selectedPath = document.getElementById("exampleSelect").value;
+      loadExample(selectedPath);
+    }
+
+    /* --- TRANSPILER & RUNNER EXECUTION --- */
+
+    async function runTranspiler() {
+      if (!pyodide) return;
+
+      showLoading("Transpiling Code...");
+      await new Promise(r => setTimeout(r, 50));
+
+      const sourceCode = document.getElementById("inputCode").value;
+      const outputEl = document.getElementById("outputCode");
+
+      try {
+        pyodide.globals.set("user_source_code", sourceCode);
+
+        pyodide.runPython(`
+transpiler = TexTranspiler()
+transpiled_output = transpiler.transpile(user_source_code)
+        `);
+
+        outputEl.value = pyodide.globals.get("transpiled_output");
+      } catch (err) {
+        outputEl.value = "Transpilation Error:\n" + err.message;
+      } finally {
+        hideLoading();
+      }
+    }
+
+    async function runTexCode() {
+      if (!pyodide) return;
+
+      showLoading("Executing TeX Code...");
+      await new Promise(r => setTimeout(r, 50));
+
+      // Re-transpile first
+      const sourceCode = document.getElementById("inputCode").value;
+      const outputEl = document.getElementById("outputCode");
+
+      try {
+        pyodide.globals.set("user_source_code", sourceCode);
+        pyodide.runPython(`
+transpiler = TexTranspiler()
+transpiled_output = transpiler.transpile(user_source_code)
+        `);
+        outputEl.value = pyodide.globals.get("transpiled_output");
+      } catch (err) {
+        outputEl.value = "Transpilation Error:\n" + err.message;
+        hideLoading();
+        return;
+      }
+
+      const transpiledCode = outputEl.value;
+      const args = getArguments();
+      const execOutputEl = document.getElementById("executionOutput");
+
+      execOutputEl.value = "Running...";
+
+      try {
+        pyodide.globals.set("user_tex_code", transpiledCode);
+        pyodide.globals.set("user_args", args);
+
+        pyodide.runPython(`
+import sys
+import io
+import time
+import types
+
+# 1. Mock missing terminal modules (termios & tty) for browser environment
+if 'termios' not in sys.modules:
+    termios_mock = types.ModuleType('termios')
+    termios_mock.TCSADRAIN = 0
+    termios_mock.tcgetattr = lambda fd: [0, 0, 0, 0, 0, 0, []]
+    termios_mock.tcsetattr = lambda fd, opt, settings: None
+    sys.modules['termios'] = termios_mock
+
+if 'tty' not in sys.modules:
+    tty_mock = types.ModuleType('tty')
+    tty_mock.setraw = lambda fd: None
+    tty_mock.setcbreak = lambda fd: None
+    sys.modules['tty'] = tty_mock
+
+# 2. Capture stdout and stderr
+old_stdout, old_stderr = sys.stdout, sys.stderr
+sys.stdout = stdout_buf = io.StringIO()
+sys.stderr = stderr_buf = io.StringIO()
+
+# 3. Write code.tex to virtual filesystem
+with open("code.tex", "w", encoding="utf-8") as f:
+    f.write(user_tex_code)
+
+# 4. Construct CLI arguments: python3 tex.py code.tex -- "arg1" "arg2"
+sys.argv = ["tex.py", "code.tex"]
+if user_args:
+    sys.argv.append("--")
+    sys.argv.extend(user_args)
+
+# 5. Set 5-second execution timeout using sys.settrace
+start_time = time.time()
+
+def timeout_trace(frame, event, arg):
+    if time.time() - start_time > 5.0:
+        raise TimeoutError("Execution timed out! Exceeded 5 seconds limit.")
+    return timeout_trace
+
+sys.settrace(timeout_trace)
+
+try:
+    if 'tex_source_code' in globals():
+        tex_globals = {'__name__': '__main__'}
+        exec(tex_source_code, tex_globals)
+    else:
+        print("[Notice] Transpiled TeX output ready. Add tex.py to repo for live execution output.")
+except SystemExit:
+    pass  # Allow normal exit
+except TimeoutError as te:
+    print(f"\\n[Error] {te}", file=sys.stderr)
+except Exception as ex:
+    print(f"Runtime Exception: {ex}", file=sys.stderr)
+finally:
+    sys.settrace(None)
+    sys.stdout = old_stdout
+    sys.stderr = old_stderr
+
+run_result = stdout_buf.getvalue() + stderr_buf.getvalue()
+        `);
+
+        execOutputEl.value = pyodide.globals.get("run_result") || "(No output produced)";
+      } catch (err) {
+        execOutputEl.value = "Execution Error:\n" + err.message;
+      } finally {
+        hideLoading();
+      }
+    }
+
+    initPyodide();
+  </script>
+
+</body>
+</html>

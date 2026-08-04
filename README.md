@@ -1,17 +1,19 @@
 # tex-generator
 similar to fish-generator but for tex
 
+#### [Inspiration](https://scpchicken.github.io/fish-generator/)
+#### Site Link: https://scpchicken.github.io/tex-generator/
+
 ### texc docs
 
 ```bash
 # there is no && or || operators
-# make sure you do 0-1 not -1 for negative literals
 # newline is chr(13) not chr(10)
 
 # supported operators
 # + - * / %
 # += -= *= /= %=
-# < > ==
+# == != < > >= <=
 
 i = 3
 j = i
