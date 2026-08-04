@@ -4,6 +4,8 @@ similar to fish-generator but for tex
 ### texc docs
 
 ```bash
+# newline is chr(13) not chr(10)
+
 # supported operators
 # + - * / %
 # += -= *= /= %=

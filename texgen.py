@@ -116,7 +116,7 @@ def tokenize(code: str):
         ('RBRACK',      r'\]'),
         ('LPAREN',      r'\('),
         ('RPAREN',      r'\)'),
-        ('COMP',        r'==|<|>'),
+        ('COMP',        r'==|!=|<=|>=|<|>'),
         ('COMPOUND_OP', r'\+=|-=|\*=|/=|%='),
         ('OP',          r'='),
         ('MUL_OP',      r'\*|\/|%'),
@@ -340,13 +340,9 @@ class Parser:
 # --- MACRO OPTIMIZER ---
 
 def optimize_macros(raw_tex: str) -> str:
-    # Find all reserved single-letter macros used in standard setup/vars/loops
     reserved = set(re.findall(r'\\([a-zA-Z])(?![a-zA-Z])', raw_tex))
-
-    # Candidates are any single letters not yet reserved
     candidate_letters = [c for c in (string.ascii_lowercase + string.ascii_uppercase) if c not in reserved]
 
-    # Find control sequences of length >= 2
     word_matches = re.findall(r'\\([a-zA-Z]{2,})', raw_tex)
     counts = {}
     for w in word_matches:
@@ -364,7 +360,6 @@ def optimize_macros(raw_tex: str) -> str:
     best_let_letter = None
     max_net_savings = 0
 
-    # Evaluate optimal ~ and \let configuration
     for tilde_target in tilde_options:
         for use_let_alias in (False, True):
             if tilde_target == '\\let' and use_let_alias:
@@ -401,7 +396,7 @@ def optimize_macros(raw_tex: str) -> str:
             word_savings = []
             for w in remaining_words:
                 cnt = counts[w]
-                orig_len = len(w) # e.g. len("\advance") = 8
+                orig_len = len(w)
                 setup_cost = len(let_cmd) + 2 + orig_len
                 gross = cnt * (orig_len - 2)
                 net = gross - setup_cost
@@ -423,7 +418,6 @@ def optimize_macros(raw_tex: str) -> str:
     if max_net_savings <= 0:
         return raw_tex
 
-    # Assemble header and alias map
     hdr_parts = []
     aliases = {}
 
@@ -449,7 +443,6 @@ def optimize_macros(raw_tex: str) -> str:
 
     hdr = "".join(hdr_parts)
 
-    # Perform substitutions (longest target first)
     sorted_replacements = sorted(aliases.items(), key=lambda x: len(x[0]), reverse=True)
 
     res_tex = raw_tex
@@ -464,20 +457,28 @@ def optimize_macros(raw_tex: str) -> str:
 class TexTranspiler:
     SCRATCH_POOL = ("\\a", "\\b", "\\c")
 
+    # TeX \ifnum supports '=', '<', and '>'. 
+    # Invert branches for '!=', '<=', and '>='.
+    OP_MAP = {
+        '==': ('=', False),
+        '=':  ('=', False),
+        '<':  ('<', False),
+        '>':  ('>', False),
+        '!=': ('=', True),
+        '<=': ('>', True),
+        '>=': ('<', True),
+    }
+
     def __init__(self):
         self.vars = {}
-        # Reserved single-letter control sequences:
-        # \a..\j (10 scratch registers) + \P, \S, \G, \L, \K, \V, \F (helper macros) + \X (temp macro)
         self.used_macro_names = {chr(c) for c in range(ord('a'), ord('j') + 1)}
         self.used_macro_names.update({'P', 'S', 'G', 'L', 'K', 'V', 'F', 'X'})
         self.name_gen = self._name_generator()
 
     def _name_generator(self):
-        # 1. First yield all unused single letters (a..z, A..Z)
         for c in string.ascii_lowercase + string.ascii_uppercase:
             if c not in self.used_macro_names:
                 yield f"\\{c}"
-        # 2. Fallback to 2-letter control sequences if > 52 variables/loops are allocated
         for c1 in string.ascii_lowercase + string.ascii_uppercase:
             for c2 in string.ascii_lowercase + string.ascii_uppercase:
                 yield f"\\{c1}{c2}"
@@ -501,12 +502,10 @@ class TexTranspiler:
         ast = Parser(tokens).parse_program()
         body_code = self.emit_block(ast)
 
-        # Register declarations
         regs = "\\newcount\\a\\newcount\\b\\newcount\\c\\newcount\\d\\newcount\\e\\newcount\\f\\newcount\\g\\newcount\\h\\newcount\\i\\newcount\\j"
         for user_var, tex_var in self.vars.items():
             regs += f"\\newcount{tex_var}"
 
-        # Helper macros
         helpers = (
             "\\def\\P{\\leavevmode\\par}"
             "\\def\\S#1#2#3{\\expandafter\\edef\\csname#1:\\the#2\\endcsname{\\the#3}}"
@@ -517,7 +516,7 @@ class TexTranspiler:
             "\\def\\F#1{\\ifx#1\\relax\\else\\ifnum\\h=\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\F\\fi}"
         )
 
-        raw_tex = f"{regs}{helpers}{body_code}"
+        raw_tex = f"{regs}{helpers}{body_code}\\bye"
         return optimize_macros(raw_tex)
 
     def pick_scratch(self, busy_regs=()):
@@ -627,13 +626,19 @@ class TexTranspiler:
             right_reg = "\\b"
             left_code, left_val = self.emit_operand(node.cond.left, left_reg)
             right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
-            op = "=" if node.cond.op == "==" else node.cond.op
-            code = left_code + right_code + f"\\ifnum{left_val}{op}{right_val} "
+            
+            tex_op, inverted = self.OP_MAP[node.cond.op]
+            code = left_code + right_code + f"\\ifnum{left_val}{tex_op}{right_val} "
             true_str = self.emit_block(node.true_body)
-            code += true_str
-            if node.false_body:
-                false_str = self.emit_block(node.false_body)
-                code += f"\\else {false_str}"
+            false_str = self.emit_block(node.false_body)
+            
+            if not inverted:
+                code += true_str
+                if false_str:
+                    code += f"\\else {false_str}"
+            else:
+                code += false_str
+                code += f"\\else {true_str}"
             code += "\\fi "
             return code
 
@@ -641,12 +646,16 @@ class TexTranspiler:
             loop_macro = self.get_loop_name()
             left_reg = "\\a"
             right_reg = "\\b"
-            op = "=" if node.cond.op == "==" else node.cond.op
+            tex_op, inverted = self.OP_MAP[node.cond.op]
             left_code, left_val = self.emit_operand(node.cond.left, left_reg)
             right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
             cond_code = left_code + right_code
             body_str = self.emit_block(node.body)
-            return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{op}{right_val} {body_str}\\expandafter{loop_macro}\\fi}}{loop_macro} "
+            
+            if not inverted:
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val} {body_str}\\expandafter{loop_macro}\\fi}}{loop_macro} "
+            else:
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}\\else {body_str}\\expandafter{loop_macro}\\fi}}{loop_macro} "
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
