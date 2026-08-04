@@ -1,5 +1,6 @@
 import sys
 import re
+import string
 
 # --- AST NODES ---
 
@@ -72,7 +73,6 @@ class ArgLenNode:
 # --- UNESCAPE HELPER ---
 
 def unescape_string(s: str) -> str:
-    """Strips quotes and expands escape sequences."""
     inner = s[1:-1]
     res = []
     i = 0
@@ -80,22 +80,14 @@ def unescape_string(s: str) -> str:
     while i < n:
         if inner[i] == '\\' and i + 1 < n:
             nxt = inner[i + 1]
-            if nxt == 'n':
-                res.append('\n')
-            elif nxt == 't':
-                res.append('\t')
-            elif nxt == 'r':
-                res.append('\r')
-            elif nxt == '\\':
-                res.append('\\')
-            elif nxt == '"':
-                res.append('"')
-            elif nxt == "'":
-                res.append("'")
-            elif nxt == '0':
-                res.append('\0')
-            else:
-                res.append(nxt)
+            if nxt == 'n': res.append('\n')
+            elif nxt == 't': res.append('\t')
+            elif nxt == 'r': res.append('\r')
+            elif nxt == '\\': res.append('\\')
+            elif nxt == '"': res.append('"')
+            elif nxt == "'": res.append("'")
+            elif nxt == '0': res.append('\0')
+            else: res.append(nxt)
             i += 2
         else:
             res.append(inner[i])
@@ -147,7 +139,6 @@ def tokenize(code: str):
             raise SyntaxError(f"Unexpected character {value!r}")
         tokens.append((kind, value))
     return _insert_automatic_semicolons(tokens)
-
 
 def _insert_automatic_semicolons(tokens):
     ASI_TRIGGER_KINDS = {'INT', 'IDENT', 'RPAREN', 'STRING', 'CHAR', 'RBRACK'}
@@ -346,127 +337,228 @@ class Parser:
             return expr
         raise SyntaxError(f"Expected expression, got {k}")
 
-# --- TEX TRANSPILER ---
+# --- MACRO OPTIMIZER ---
+
+def optimize_macros(raw_tex: str) -> str:
+    # Find all reserved single-letter macros used in standard setup/vars/loops
+    reserved = set(re.findall(r'\\([a-zA-Z])(?![a-zA-Z])', raw_tex))
+
+    # Candidates are any single letters not yet reserved
+    candidate_letters = [c for c in (string.ascii_lowercase + string.ascii_uppercase) if c not in reserved]
+
+    # Find control sequences of length >= 2
+    word_matches = re.findall(r'\\([a-zA-Z]{2,})', raw_tex)
+    counts = {}
+    for w in word_matches:
+        full_w = '\\' + w
+        counts[full_w] = counts.get(full_w, 0) + 1
+
+    if not counts:
+        return raw_tex
+
+    tilde_options = [None, '\\let'] + [w for w in counts if w != '\\let']
+
+    best_selected_words = []
+    best_tilde = None
+    best_use_let = False
+    best_let_letter = None
+    max_net_savings = 0
+
+    # Evaluate optimal ~ and \let configuration
+    for tilde_target in tilde_options:
+        for use_let_alias in (False, True):
+            if tilde_target == '\\let' and use_let_alias:
+                continue
+
+            avail = list(candidate_letters)
+
+            let_alias_letter = None
+            if use_let_alias:
+                if not avail:
+                    continue
+                let_alias_letter = avail.pop(0)
+
+            if tilde_target == '\\let':
+                let_cmd = "~"
+            elif use_let_alias:
+                let_cmd = f"\\{let_alias_letter}"
+            else:
+                let_cmd = "\\let"
+
+            base_hdr_cost = 0
+            if tilde_target is not None:
+                base_hdr_cost += len(f"\\let~{tilde_target}")
+            if use_let_alias:
+                base_hdr_cost += len(f"\\let\\{let_alias_letter}\\let")
+
+            tilde_gross_savings = 0
+            if tilde_target is not None and tilde_target in counts:
+                cnt = counts[tilde_target]
+                tilde_gross_savings = cnt * (len(tilde_target) - 1)
+
+            remaining_words = [w for w in counts if w != tilde_target]
+
+            word_savings = []
+            for w in remaining_words:
+                cnt = counts[w]
+                orig_len = len(w) # e.g. len("\advance") = 8
+                setup_cost = len(let_cmd) + 2 + orig_len
+                gross = cnt * (orig_len - 2)
+                net = gross - setup_cost
+                if net > 0:
+                    word_savings.append((net, gross, setup_cost, w))
+
+            word_savings.sort(key=lambda x: x[0], reverse=True)
+            selected_words = word_savings[:len(avail)]
+
+            total_net = tilde_gross_savings + sum(item[0] for item in selected_words) - base_hdr_cost
+
+            if total_net > max_net_savings:
+                max_net_savings = total_net
+                best_tilde = tilde_target
+                best_use_let = use_let_alias
+                best_let_letter = let_alias_letter
+                best_selected_words = selected_words
+
+    if max_net_savings <= 0:
+        return raw_tex
+
+    # Assemble header and alias map
+    hdr_parts = []
+    aliases = {}
+
+    if best_tilde is not None:
+        hdr_parts.append(f"\\let~{best_tilde}")
+        if best_tilde in counts:
+            aliases[best_tilde] = "~"
+
+    if best_tilde == '\\let':
+        let_cmd = "~"
+    elif best_use_let:
+        let_cmd = f"\\{best_let_letter}"
+        hdr_parts.append(f"\\let{let_cmd}\\let")
+    else:
+        let_cmd = "\\let"
+
+    avail = [c for c in candidate_letters if c != best_let_letter]
+    for _, _, _, w in best_selected_words:
+        letter = avail.pop(0)
+        alias_macro = f"\\{letter}"
+        aliases[w] = alias_macro
+        hdr_parts.append(f"{let_cmd}{alias_macro}{w}")
+
+    hdr = "".join(hdr_parts)
+
+    # Perform substitutions (longest target first)
+    sorted_replacements = sorted(aliases.items(), key=lambda x: len(x[0]), reverse=True)
+
+    res_tex = raw_tex
+    for word, alias in sorted_replacements:
+        pattern = re.escape(word) + r'(?![a-zA-Z])'
+        res_tex = re.sub(pattern, lambda m, a=alias: a, res_tex)
+
+    return hdr + res_tex
+
+# --- OPTIMIZED TEX TRANSPILER ---
 
 class TexTranspiler:
+    SCRATCH_POOL = ("\\a", "\\b", "\\c")
+
     def __init__(self):
         self.vars = {}
-        self.var_counter = 0
-        self.loop_counter = 0
+        # Reserved single-letter control sequences:
+        # \a..\j (10 scratch registers) + \P, \S, \G, \L, \K, \V, \F (helper macros) + \X (temp macro)
+        self.used_macro_names = {chr(c) for c in range(ord('a'), ord('j') + 1)}
+        self.used_macro_names.update({'P', 'S', 'G', 'L', 'K', 'V', 'F', 'X'})
+        self.name_gen = self._name_generator()
+
+    def _name_generator(self):
+        # 1. First yield all unused single letters (a..z, A..Z)
+        for c in string.ascii_lowercase + string.ascii_uppercase:
+            if c not in self.used_macro_names:
+                yield f"\\{c}"
+        # 2. Fallback to 2-letter control sequences if > 52 variables/loops are allocated
+        for c1 in string.ascii_lowercase + string.ascii_uppercase:
+            for c2 in string.ascii_lowercase + string.ascii_uppercase:
+                yield f"\\{c1}{c2}"
 
     def get_var(self, name):
         if name == "argc":
             return "\\argc"
         if name not in self.vars:
-            self.vars[name] = f"\\v{chr(65 + self.var_counter)}"
-            self.var_counter += 1
+            var_name = next(self.name_gen)
+            self.vars[name] = var_name
+            self.used_macro_names.add(var_name[1:])
         return self.vars[name]
 
-    def get_loop_names(self):
-        c = self.loop_counter
-        self.loop_counter += 1
-        res = ""
-        c_temp = c
-        while True:
-            res = chr(65 + (c_temp % 26)) + res
-            c_temp = c_temp // 26 - 1
-            if c_temp < 0:
-                break
-        return f"\\loop{res}", f"\\next{res}"
+    def get_loop_name(self):
+        loop_name = next(self.name_gen)
+        self.used_macro_names.add(loop_name[1:])
+        return loop_name
 
     def transpile(self, code: str) -> str:
         tokens = tokenize(code)
         ast = Parser(tokens).parse_program()
-        
         body_code = self.emit_block(ast)
 
-        tex_code = "% --- Register Declarations ---\n"
-        tex_code += "\\newcount\\tA \\newcount\\tB \\newcount\\tC \\newcount\\tD % Scratch registers\n"
-        tex_code += "\\newcount\\strlen \\newcount\\charval \\newcount\\targetidx \\newcount\\curridx % Helper registers\n"
-        tex_code += "\\newcount\\arridx \\newcount\\arrval % Array helper registers\n\n"
-        
+        # Register declarations
+        regs = "\\newcount\\a\\newcount\\b\\newcount\\c\\newcount\\d\\newcount\\e\\newcount\\f\\newcount\\g\\newcount\\h\\newcount\\i\\newcount\\j"
         for user_var, tex_var in self.vars.items():
-            tex_code += f"\\newcount{tex_var} % {user_var}\n"
-            
-        tex_code += "\n% --- TeX Argv & Array Parsing Helpers ---\n"
-        tex_code += "\\def\\calcarglen#1{%\n"
-        tex_code += "  \\strlen=0\n"
-        tex_code += "  \\edef\\argstr{\\argv#1\\relax}%\n"
-        tex_code += "  \\expandafter\\countlen\\argstr\n"
-        tex_code += "}\n"
-        tex_code += "\\def\\countlen#1{\\ifx#1\\relax\\else\\advance\\strlen 1 \\expandafter\\countlen\\fi}\n\n"
-        
-        tex_code += "\\def\\calcargvchar#1#2{%\n"
-        tex_code += "  \\targetidx=#2\\relax \\curridx=0\\relax \\charval=0\\relax\n"
-        tex_code += "  \\edef\\argstr{\\argv#1\\relax}%\n"
-        tex_code += "  \\expandafter\\findchar\\argstr\n"
-        tex_code += "}\n"
-        tex_code += "\\def\\findchar#1{%\n"
-        tex_code += "  \\ifx#1\\relax\n"
-        tex_code += "  \\else\n"
-        tex_code += "    \\ifnum\\curridx=\\targetidx\\charval=`#1\\fi\n"
-        tex_code += "    \\advance\\curridx 1\n"
-        tex_code += "    \\expandafter\\findchar\n"
-        tex_code += "  \\fi\n"
-        tex_code += "}\n\n"
+            regs += f"\\newcount{tex_var}"
 
-        tex_code += "\\def\\setarray#1#2#3{%\n"
-        tex_code += "  \\expandafter\\edef\\csname arr@#1:\\the#2\\endcsname{\\the#3}%\n"
-        tex_code += "}\n"
-        tex_code += "\\def\\getarray#1#2#3{%\n"
-        tex_code += "  \\expandafter\\ifx\\csname arr@#1:\\the#2\\endcsname\\relax\n"
-        tex_code += "    #3=0\\relax\n"
-        tex_code += "  \\else\n"
-        tex_code += "    #3=\\csname arr@#1:\\the#2\\endcsname\\relax\n"
-        tex_code += "  \\fi\n"
-        tex_code += "}\n\n"
-        
-        tex_code += "% --- Program Body ---\n"
-        tex_code += body_code + "\n\\bye"
-        return tex_code
+        # Helper macros
+        helpers = (
+            "\\def\\P{\\leavevmode\\par}"
+            "\\def\\S#1#2#3{\\expandafter\\edef\\csname#1:\\the#2\\endcsname{\\the#3}}"
+            "\\def\\G#1#2#3{\\expandafter\\ifx\\csname#1:\\the#2\\endcsname\\relax#30 \\else#3\\csname#1:\\the#2\\endcsname\\fi}"
+            "\\def\\L#1{\\e0 \\edef\\X{\\argv#1\\relax}\\expandafter\\K\\X}"
+            "\\def\\K#1{\\ifx#1\\relax\\else\\advance\\e1 \\expandafter\\K\\fi}"
+            "\\def\\V#1#2{\\g#2\\h0 \\f0 \\edef\\X{\\argv#1\\relax}\\expandafter\\F\\X}"
+            "\\def\\F#1{\\ifx#1\\relax\\else\\ifnum\\h=\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\F\\fi}"
+        )
 
-    SCRATCH_POOL = ("\\tA", "\\tB", "\\tC")
+        raw_tex = f"{regs}{helpers}{body_code}"
+        return optimize_macros(raw_tex)
 
-    def pick_scratch(self, *exclude):
+    def pick_scratch(self, busy_regs=()):
         for reg in self.SCRATCH_POOL:
-            if reg not in exclude:
+            if reg not in busy_regs:
                 return reg
         raise RuntimeError("no free scratch register available")
 
-    def emit_operand(self, node, scratch_reg):
+    def emit_operand(self, node, scratch_reg, busy_regs=()):
         if isinstance(node, VarRef) and node.name == "argc":
             return "", "\\argc"
-        code = self.emit_eval(node, scratch_reg)
+        code = self.emit_eval(node, scratch_reg, busy_regs)
         return code, scratch_reg
 
-    def emit_eval(self, node, target_reg="\\tA"):
+    def emit_eval(self, node, target_reg="\\a", busy_regs=()):
+        current_busy = set(busy_regs) | {target_reg}
         if isinstance(node, IntNode):
-            return f"{target_reg}={node.val} "
+            return f"{target_reg}{node.val} "
         elif isinstance(node, VarRef):
-            return f"{target_reg}={self.get_var(node.name)} "
+            return f"{target_reg}{self.get_var(node.name)} "
         elif isinstance(node, ArrayAccessNode):
-            idx_reg = self.pick_scratch(target_reg)
-            code = self.emit_eval(node.index, idx_reg)
-            code += f"\\getarray{{{node.name}}}{{{idx_reg}}}{{{target_reg}}}"
+            idx_reg = self.pick_scratch(current_busy)
+            code = self.emit_eval(node.index, idx_reg, current_busy)
+            code += f"\\G{{{node.name}}}{{{idx_reg}}}{{{target_reg}}}"
             return code
         elif isinstance(node, ArgLenNode):
-            arg_reg = self.pick_scratch(target_reg)
-            code = self.emit_eval(node.arg_idx, arg_reg)
-            code += f"\\calcarglen{arg_reg}"
-            code += f"{target_reg}=\\strlen "
+            arg_reg = self.pick_scratch(current_busy)
+            code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
+            code += f"\\L{{{arg_reg}}}{target_reg}\\e "
             return code
         elif isinstance(node, ArgvCharNode):
-            arg_reg = self.pick_scratch(target_reg)
-            char_reg = self.pick_scratch(target_reg, arg_reg)
-            code = self.emit_eval(node.arg_idx, arg_reg)
-            code += self.emit_eval(node.char_idx, char_reg)
-            code += f"\\calcargvchar{arg_reg}{char_reg}"
-            code += f"{target_reg}=\\charval "
+            arg_reg = self.pick_scratch(current_busy)
+            char_reg = self.pick_scratch(current_busy | {arg_reg})
+            code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
+            code += self.emit_eval(node.char_idx, char_reg, current_busy | {arg_reg})
+            code += f"\\V{{{arg_reg}}}{{{char_reg}}}{target_reg}\\f "
             return code
         elif isinstance(node, BinaryOpNode):
-            code = self.emit_eval(node.left, target_reg)
-            right_reg = self.pick_scratch(target_reg)
-            right_code, right_val = self.emit_operand(node.right, right_reg)
+            code = self.emit_eval(node.left, target_reg, busy_regs)
+            right_reg = self.pick_scratch(current_busy)
+            right_code, right_val = self.emit_operand(node.right, right_reg, current_busy)
             code += right_code
             
             if node.op == '+':
@@ -478,98 +570,83 @@ class TexTranspiler:
             elif node.op == '/':
                 code += f"\\divide{target_reg}{right_val} "
             elif node.op == '%':
-                code += f"\\tD={target_reg} \\divide\\tD{right_val} \\multiply\\tD{right_val} \\advance{target_reg}-\\tD "
+                code += f"\\d{target_reg}\\divide\\d{right_val}\\multiply\\d{right_val}\\advance{target_reg}-\\d "
             return code
 
     def emit_block(self, nodes):
-        return "\n".join(self.emit_node(n) for n in nodes)
+        return "".join(self.emit_node(n) for n in nodes)
 
     def emit_node(self, node):
         if isinstance(node, AssignNode):
             tex_var = self.get_var(node.target.name)
-            return self.emit_eval(node.rhs, tex_var) + "%"
+            return self.emit_eval(node.rhs, tex_var)
 
         elif isinstance(node, ArrayAssignNode):
-            code = self.emit_eval(node.index, "\\arridx")
-            code += self.emit_eval(node.rhs, "\\arrval")
-            code += f"\\setarray{{{node.name}}}{{\\arridx}}{{\\arrval}}%"
+            code = self.emit_eval(node.index, "\\i")
+            code += self.emit_eval(node.rhs, "\\j")
+            code += f"\\S{{{node.name}}}{{\\i}}{{\\j}}"
             return code
 
         elif isinstance(node, ArrayLiteralAssignNode):
             code_parts = []
             for i, elem in enumerate(node.elements):
-                code = f"\\arridx={i} "
-                code += self.emit_eval(elem, "\\arrval")
-                code += f"\\setarray{{{node.name}}}{{\\arridx}}{{\\arrval}}%"
+                code = f"\\i{i} "
+                code += self.emit_eval(elem, "\\j")
+                code += f"\\S{{{node.name}}}{{\\i}}{{\\j}}"
                 code_parts.append(code)
-            return "\n".join(code_parts)
+            return "".join(code_parts)
 
         elif isinstance(node, PrintNode):
-            code, val = self.emit_operand(node.operand, "\\tA")
+            code, val = self.emit_operand(node.operand, "\\a")
             if node.is_char:
-                code += f"\\char{val}"
+                code += f"\\char{val} "
             else:
-                code += f"\\the{val}"
+                code += f"\\the{val} "
             if node.newline:
-                code += "\\leavevmode\\par%\n"
-            else:
-                code += "%"
+                code += "\\P "
             return code
 
         elif isinstance(node, PrintStringNode):
-            code = ""
+            TEX_SPECIALS = set(r'\_{}%#~^&$')
+            res = []
             for ch in node.text:
                 if ch == '\n':
-                    code += "\\leavevmode\\par%\n"
+                    res.append("\\P ")
+                elif ch == ' ':
+                    res.append("\\ ")
+                elif ch in TEX_SPECIALS:
+                    res.append(f"\\char{ord(ch)} ")
                 else:
-                    code += f"\\char{ord(ch)} "
+                    res.append(ch)
             if node.newline:
-                code += "\\leavevmode\\par%\n"
-            else:
-                if not code.endswith("%") and not code.endswith("\n"):
-                    code += "%"
-            return code
-            
+                res.append("\\P ")
+            return "".join(res)
+
         elif isinstance(node, IfNode):
-            left_reg = "\\tA"
-            right_reg = "\\tB"
+            left_reg = "\\a"
+            right_reg = "\\b"
             left_code, left_val = self.emit_operand(node.cond.left, left_reg)
-            right_code, right_val = self.emit_operand(node.cond.right, right_reg)
-            code = left_code + right_code
-            
+            right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
             op = "=" if node.cond.op == "==" else node.cond.op
-            code += f"\\ifnum{left_val}{op}{right_val}%\n"
+            code = left_code + right_code + f"\\ifnum{left_val}{op}{right_val} "
             true_str = self.emit_block(node.true_body)
-            if true_str:
-                code += true_str + "\n"
+            code += true_str
             if node.false_body:
-                code += "\\else%\n"
                 false_str = self.emit_block(node.false_body)
-                if false_str:
-                    code += false_str + "\n"
-            code += "\\fi%"
+                code += f"\\else {false_str}"
+            code += "\\fi "
             return code
-            
+
         elif isinstance(node, WhileNode):
-            loop_macro, next_macro = self.get_loop_names()
-            left_reg = "\\tA"
-            right_reg = "\\tB"
+            loop_macro = self.get_loop_name()
+            left_reg = "\\a"
+            right_reg = "\\b"
             op = "=" if node.cond.op == "==" else node.cond.op
-            
             left_code, left_val = self.emit_operand(node.cond.left, left_reg)
-            right_code, right_val = self.emit_operand(node.cond.right, right_reg)
-            code = f"\\def{loop_macro}{{"
-            code += left_code
-            code += right_code
-            code += f"\\ifnum{left_val}{op}{right_val}%\n"
+            right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
+            cond_code = left_code + right_code
             body_str = self.emit_block(node.body)
-            if body_str:
-                code += body_str + "\n"
-            code += f"\\let{next_macro}={loop_macro}%\n"
-            code += f"\\else\\let{next_macro}=\\relax\\fi%\n"
-            code += f"{next_macro}}}%\n"
-            code += f"{loop_macro}%"
-            return code
+            return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{op}{right_val} {body_str}\\expandafter{loop_macro}\\fi}}{loop_macro} "
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
