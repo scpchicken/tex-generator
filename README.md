@@ -29,11 +29,15 @@ print(len)
 
 # Loop over each character in argument 1 and output it
 i = 0
-while (i < len) {
+while i < len {
     ch = argv(1, i)
     putc(ch)
     i = i + 1
 }
 
 println("hello")
+
+arr = [1,2,3]
+arr[0] = 99
+println(arr[0])
 ```

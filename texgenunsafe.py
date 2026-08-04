@@ -361,17 +361,6 @@ class Parser:
             return expr
         raise SyntaxError(f"Expected expression, got {k}")
 
-# --- HELPER FOR SAFE CONCATENATION ---
-
-def safe_concat(a: str, b: str) -> str:
-    if not a or not b:
-        return a + b
-    # If `a` ends with a letter macro (e.g. \b, \foo) and `b` starts with an ASCII letter [a-zA-Z],
-    # insert a space between them so TeX doesn't merge the macro name with the literal string.
-    if re.search(r'\\[a-zA-Z]+$', a) and b[0].isalpha():
-        return a + " " + b
-    return a + b
-
 # --- MACRO OPTIMIZER ---
 
 def optimize_macros(raw_tex: str) -> str:
@@ -387,7 +376,10 @@ def optimize_macros(raw_tex: str) -> str:
     if not counts:
         return raw_tex
 
-    tilde_options = [None, '\\let'] + [w for w in counts if w != '\\let']
+    tilde_options = [None, '\\let'] + [
+        w for w in counts 
+        if w != '\\let' and not re.search(re.escape(w) + r'\s', raw_tex)
+    ]
 
     best_selected_words = []
     best_tilde = None
@@ -490,6 +482,7 @@ def optimize_macros(raw_tex: str) -> str:
 # --- OPTIMIZED TEX TRANSPILER ---
 
 class TexTranspiler:
+    # 10 Scratch registers available (\a through \j)
     SCRATCH_POOL = ("\\a", "\\b", "\\c", "\\d", "\\e", "\\f", "\\g", "\\h", "\\i", "\\j")
 
     OP_MAP = {
@@ -524,6 +517,38 @@ class TexTranspiler:
             for c2 in string.ascii_lowercase + string.ascii_uppercase:
                 yield f"\\l{c1}{c2}"
 
+    @staticmethod
+    def is_single_token(s: str) -> bool:
+        if len(s) == 1:
+            return True
+        if s.startswith('\\') and re.match(r'^\\[a-zA-Z]+$', s):
+            return True
+        if s.startswith('\\') and len(s) == 2:
+            return True
+        return False
+
+    @staticmethod
+    def ends_with_control_word(s: str) -> bool:
+        return re.search(r'\\[a-zA-Z]+$', s) is not None
+
+    def format_macro_call(self, macro: str, args: list) -> str:
+        res = macro
+        for arg in args:
+            arg_str = str(arg)
+            if not self.is_single_token(arg_str):
+                res += f"{{{arg_str}}}"
+            elif self.ends_with_control_word(res):
+                if re.match(r'^[a-zA-Z]', arg_str):
+                    res += f"\x00{arg_str}"
+                else:
+                    res += arg_str
+            else:
+                if re.match(r'^[a-zA-Z]', arg_str) and re.search(r'[a-zA-Z]$', res):
+                    res += f"{{{arg_str}}}"
+                else:
+                    res += arg_str
+        return res
+
     def get_array_tag(self, name: str) -> str:
         if name not in self.array_tags:
             tag = chr(ord('a') + self.array_tag_counter)
@@ -554,30 +579,45 @@ class TexTranspiler:
         ast = Parser(tokens).parse_program()
         body_code = self.emit_block(ast)
 
+        # Golfed header for register allocations using active ~ alias for \newcount
         ordered_scratch = [reg for reg in self.SCRATCH_POOL if reg in self.used_scratch_regs]
-        regs = "".join(f"\\newcount{reg}" for reg in ordered_scratch)
+        all_regs = ordered_scratch + list(self.vars.values())
+        if all_regs:
+            regs = "\\let~\\newcount" + "".join(f"~{reg}" for reg in all_regs)
+        else:
+            regs = ""
 
-        for user_var, tex_var in self.vars.items():
-            regs += f"\\newcount{tex_var}"
-
+        # Dynamically append helper definitions (golfed)
         helpers = ""
         if "\\HP" in body_code:
-            helpers += "\\def\\HP{\\leavevmode\\par}"
+            helpers += "\\def\\HP{\\par}"
         if "\\HS" in body_code:
             helpers += "\\def\\HS#1#2#3{\\expandafter\\edef\\csname#1:\\the#2\\endcsname{\\the#3}}"
         if "\\HG" in body_code:
-            helpers += "\\def\\HG#1#2#3{\\expandafter\\ifx\\csname#1:\\the#2\\endcsname\\relax#30\\else#3\\csname#1:\\the#2\\endcsname\\fi}"
+            helpers += "\\def\\HG#1#2#3{\\expandafter\\ifx\\csname#1:\\the#2\\endcsname\\relax#30 \\else#3\\csname#1:\\the#2\\endcsname\\fi}"
         if "\\HL" in body_code:
-            helpers += "\\def\\HL#1{\\e0 \\edef\\HX{\\argv#1\\relax}\\expandafter\\HK\\HX}\\def\\HK#1{\\ifx#1\\relax\\else\\advance\\e1\\expandafter\\HK\\fi}"
+            helpers += "\\def\\HL#1{\\e0\\edef\\HX{\\argv#1\\relax}\\expandafter\\HK\\HX}\\def\\HK#1{\\ifx#1\\relax\\else\\advance\\e1\\expandafter\\HK\\fi}"
         if "\\HV" in body_code:
-            helpers += "\\def\\HV#1#2{\\g#2\\h0\\f0\\edef\\HX{\\argv#1\\relax}\\expandafter\\HF\\HX}\\def\\HF#1{\\ifx#1\\relax\\else\\ifnum\\h=\\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\HF\\fi}"
+            helpers += "\\def\\HV#1#2{\\g#2\\h0\\f0\\edef\\HX{\\argv#1\\relax}\\expandafter\\HF\\HX}\\def\\HF#1{\\ifx#1\\relax\\else\\ifnum\\h=\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\HF\\fi}"
 
-        body_code = re.sub(r"(\d)\s+(\\ifnum|\\the)", lambda m: m.group(1) + '\x00' + m.group(2), body_code)
-        body_code = re.sub(r"(\d)\s+(\\)", lambda m: m.group(1) + m.group(2), body_code)
-        body_code = body_code.replace("\x00", " ")
-        raw_tex = safe_concat(f"{regs}{helpers}", body_code)
-        optim = optimize_macros(raw_tex)
-        return optim
+        # 1. Protect ALL spaces in helpers
+        helpers_protected = helpers.replace(' ', '\x00')
+
+        raw_tex = f"{regs}{helpers_protected}{body_code}"
+
+        # 2. Protect explicit control spaces (\ ) for literal strings
+        raw_tex = raw_tex.replace('\\ ', '\\\x00')
+
+        # 3. Protect spaces after any digit preceding expandable control sequences
+        raw_tex = re.sub(r'(\d)\s+(\\ifnum|\\the|\\char|\\HP)', lambda m: m.group(1) + '\x00' + m.group(2), raw_tex)
+
+        # 4. Strip all remaining unprotected spaces
+        raw_tex = raw_tex.replace(' ', '')
+
+        # 5. Restore protected spaces
+        raw_tex = raw_tex.replace('\x00', ' ')
+
+        return optimize_macros(raw_tex)
 
     def emit_operand(self, node, scratch_reg, busy_regs=()):
         if isinstance(node, VarRef) and node.name == "argc":
@@ -589,7 +629,11 @@ class TexTranspiler:
         self.used_scratch_regs.add(target_reg)
         current_busy = set(busy_regs) | {target_reg}
         if isinstance(node, IntNode):
-            return f"{target_reg}{node.val} "
+            val = node.val
+            # Use backtick ASCII conversion for 3-digit ASCII characters (100-127)
+            if 100 <= val <= 127:
+                return f"{target_reg}`{chr(val)}"
+            return f"{target_reg}{val} "
         elif isinstance(node, UnaryOpNode):
             if node.op == '-':
                 code = self.emit_eval(node.operand, target_reg, busy_regs)
@@ -601,13 +645,13 @@ class TexTranspiler:
             idx_reg = self.pick_scratch(current_busy)
             code = self.emit_eval(node.index, idx_reg, current_busy)
             tag = self.get_array_tag(node.name)
-            code += f"\\HG {tag}{idx_reg}{target_reg}"
+            code += self.format_macro_call("\\HG", [tag, idx_reg, target_reg])
             return code
         elif isinstance(node, ArgLenNode):
             self.used_scratch_regs.add("\\e")
             arg_reg = self.pick_scratch(current_busy)
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
-            code += f"\\HL{arg_reg}{target_reg}\\e"
+            code += self.format_macro_call("\\HL", [arg_reg]) + f"{target_reg}\\e"
             return code
         elif isinstance(node, ArgvCharNode):
             self.used_scratch_regs.update({"\\f", "\\g", "\\h"})
@@ -615,7 +659,7 @@ class TexTranspiler:
             char_reg = self.pick_scratch(current_busy | {arg_reg})
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
             code += self.emit_eval(node.char_idx, char_reg, current_busy | {arg_reg})
-            code += f"\\HV{arg_reg}{char_reg}{target_reg}\\f"
+            code += self.format_macro_call("\\HV", [arg_reg, char_reg]) + f"{target_reg}\\f"
             return code
         elif isinstance(node, BinaryOpNode):
             code = self.emit_eval(node.left, target_reg, busy_regs)
@@ -643,10 +687,7 @@ class TexTranspiler:
             return code
 
     def emit_block(self, nodes):
-        res = ""
-        for n in nodes:
-            res = safe_concat(res, self.emit_node(n))
-        return res
+        return "".join(self.emit_node(n) for n in nodes)
 
     def emit_node(self, node):
         if isinstance(node, AssignNode):
@@ -658,7 +699,7 @@ class TexTranspiler:
             code = self.emit_eval(node.index, "\\i")
             code += self.emit_eval(node.rhs, "\\j", busy_regs={"\\i"})
             tag = self.get_array_tag(node.name)
-            code += f"\\HS {tag}\\i\\j"
+            code += self.format_macro_call("\\HS", [tag, "\\i", "\\j"])
             return code
 
         elif isinstance(node, ArrayLiteralAssignNode):
@@ -668,7 +709,7 @@ class TexTranspiler:
             for i, elem in enumerate(node.elements):
                 code = f"\\i{i} "
                 code += self.emit_eval(elem, "\\j", busy_regs={"\\i"})
-                code += f"\\HS {tag}\\i\\j"
+                code += self.format_macro_call("\\HS", [tag, "\\i", "\\j"])
                 code_parts.append(code)
             return "".join(code_parts)
 
@@ -676,7 +717,13 @@ class TexTranspiler:
             reg = self.pick_scratch()
             code, val = self.emit_operand(node.operand, reg)
             if node.is_char:
-                code += f"\\char{val}"
+                if isinstance(node.operand, IntNode):
+                    if node.operand.val in (10, 13):
+                        code += "\\HP"
+                    else:
+                        code += f"\\char{val}"
+                else:
+                    code += f"\\ifnum{val}=10\\HP\\else\\ifnum{val}=13\\HP\\else\\char{val}\\fi\\fi"
             else:
                 code += f"\\the{val}"
             if node.newline:
@@ -686,17 +733,13 @@ class TexTranspiler:
         elif isinstance(node, PrintStringNode):
             TEX_SPECIALS = set(r'\_{}%#~^&$')
             res = []
-            n_text = len(node.text)
-            for i, ch in enumerate(node.text):
+            for ch in node.text:
                 if ch == '\n':
                     res.append("\\HP")
                 elif ch == ' ':
-                    if i > 0 and i < n_text - 1 and (node.text[i-1] != ' ' and node.text[i-1] != '\n' and node.text[i-1] not in TEX_SPECIALS) and (node.text[i+1] != ' ' and node.text[i+1] != '\n' and node.text[i+1] not in TEX_SPECIALS):
-                        res.append(" ")
-                    else:
-                        res.append("\\ ")
+                    res.append("\\ ")
                 elif ch in TEX_SPECIALS:
-                    res.append(f"\\char{ord(ch)} ")
+                    res.append(f"\\char{ord(ch)}")
                 else:
                     res.append(ch)
             if node.newline:
@@ -710,18 +753,17 @@ class TexTranspiler:
             right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
             
             tex_op, inverted = self.OP_MAP[node.cond.op]
-            cond_prefix = left_code + right_code + f"\\ifnum{left_val}{tex_op}{right_val}"
+            code = left_code + right_code + f"\\ifnum{left_val}{tex_op}{right_val}"
             true_str = self.emit_block(node.true_body)
             false_str = self.emit_block(node.false_body)
             
             if not inverted:
-                code = safe_concat(cond_prefix, true_str)
+                code += true_str
                 if false_str:
-                    code = safe_concat(code, f"\\else{false_str}")
+                    code += f"\\else{false_str}"
             else:
-                code = safe_concat(cond_prefix, false_str)
-                if true_str:
-                    code = safe_concat(code, f"\\else{true_str}")
+                code += false_str
+                code += f"\\else{true_str}"
             code += "\\fi"
             return code
 
@@ -736,15 +778,9 @@ class TexTranspiler:
             body_str = self.emit_block(node.body)
             
             if not inverted:
-                head = f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}"
-                tail = f"\\expandafter{loop_macro}\\fi}}{loop_macro}"
-                inner = safe_concat(head, body_str)
-                return safe_concat(inner, tail)
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}{body_str}{loop_macro}\\fi}}{loop_macro}"
             else:
-                head = f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}\\else"
-                tail = f"\\expandafter{loop_macro}\\fi}}{loop_macro}"
-                inner = safe_concat(head, body_str)
-                return safe_concat(inner, tail)
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}\\else{body_str}{loop_macro}\\fi}}{loop_macro}"
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

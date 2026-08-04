@@ -1,5 +1,6 @@
 bruh = "hello67"
-bruh[0] = 106
+ind = 0
+bruh[ind] = 106
 
 i = 0
 while i < 7 {

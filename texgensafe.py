@@ -361,17 +361,6 @@ class Parser:
             return expr
         raise SyntaxError(f"Expected expression, got {k}")
 
-# --- HELPER FOR SAFE CONCATENATION ---
-
-def safe_concat(a: str, b: str) -> str:
-    if not a or not b:
-        return a + b
-    # If `a` ends with a letter macro (e.g. \b, \foo) and `b` starts with an ASCII letter [a-zA-Z],
-    # insert a space between them so TeX doesn't merge the macro name with the literal string.
-    if re.search(r'\\[a-zA-Z]+$', a) and b[0].isalpha():
-        return a + " " + b
-    return a + b
-
 # --- MACRO OPTIMIZER ---
 
 def optimize_macros(raw_tex: str) -> str:
@@ -490,6 +479,7 @@ def optimize_macros(raw_tex: str) -> str:
 # --- OPTIMIZED TEX TRANSPILER ---
 
 class TexTranspiler:
+    # 10 Scratch registers available (\a through \j)
     SCRATCH_POOL = ("\\a", "\\b", "\\c", "\\d", "\\e", "\\f", "\\g", "\\h", "\\i", "\\j")
 
     OP_MAP = {
@@ -572,12 +562,11 @@ class TexTranspiler:
         if "\\HV" in body_code:
             helpers += "\\def\\HV#1#2{\\g#2\\h0\\f0\\edef\\HX{\\argv#1\\relax}\\expandafter\\HF\\HX}\\def\\HF#1{\\ifx#1\\relax\\else\\ifnum\\h=\\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\HF\\fi}"
 
-        body_code = re.sub(r"(\d)\s+(\\ifnum|\\the)", lambda m: m.group(1) + '\x00' + m.group(2), body_code)
+        body_code = re.sub(r"(\d)\s+(\\ifnum)", lambda m: m.group(1) + '\x00' + m.group(2), body_code)
         body_code = re.sub(r"(\d)\s+(\\)", lambda m: m.group(1) + m.group(2), body_code)
         body_code = body_code.replace("\x00", " ")
-        raw_tex = safe_concat(f"{regs}{helpers}", body_code)
-        optim = optimize_macros(raw_tex)
-        return optim
+        raw_tex = f"{regs}{helpers}{body_code}"
+        return optimize_macros(raw_tex)
 
     def emit_operand(self, node, scratch_reg, busy_regs=()):
         if isinstance(node, VarRef) and node.name == "argc":
@@ -643,10 +632,7 @@ class TexTranspiler:
             return code
 
     def emit_block(self, nodes):
-        res = ""
-        for n in nodes:
-            res = safe_concat(res, self.emit_node(n))
-        return res
+        return "".join(self.emit_node(n) for n in nodes)
 
     def emit_node(self, node):
         if isinstance(node, AssignNode):
@@ -686,15 +672,11 @@ class TexTranspiler:
         elif isinstance(node, PrintStringNode):
             TEX_SPECIALS = set(r'\_{}%#~^&$')
             res = []
-            n_text = len(node.text)
-            for i, ch in enumerate(node.text):
+            for ch in node.text:
                 if ch == '\n':
                     res.append("\\HP")
                 elif ch == ' ':
-                    if i > 0 and i < n_text - 1 and (node.text[i-1] != ' ' and node.text[i-1] != '\n' and node.text[i-1] not in TEX_SPECIALS) and (node.text[i+1] != ' ' and node.text[i+1] != '\n' and node.text[i+1] not in TEX_SPECIALS):
-                        res.append(" ")
-                    else:
-                        res.append("\\ ")
+                    res.append("\\ ")
                 elif ch in TEX_SPECIALS:
                     res.append(f"\\char{ord(ch)} ")
                 else:
@@ -710,18 +692,17 @@ class TexTranspiler:
             right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
             
             tex_op, inverted = self.OP_MAP[node.cond.op]
-            cond_prefix = left_code + right_code + f"\\ifnum{left_val}{tex_op}{right_val}"
+            code = left_code + right_code + f"\\ifnum{left_val}{tex_op}{right_val}"
             true_str = self.emit_block(node.true_body)
             false_str = self.emit_block(node.false_body)
             
             if not inverted:
-                code = safe_concat(cond_prefix, true_str)
+                code += true_str
                 if false_str:
-                    code = safe_concat(code, f"\\else{false_str}")
+                    code += f"\\else{false_str}"
             else:
-                code = safe_concat(cond_prefix, false_str)
-                if true_str:
-                    code = safe_concat(code, f"\\else{true_str}")
+                code += false_str
+                code += f"\\else{true_str}"
             code += "\\fi"
             return code
 
@@ -736,15 +717,9 @@ class TexTranspiler:
             body_str = self.emit_block(node.body)
             
             if not inverted:
-                head = f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}"
-                tail = f"\\expandafter{loop_macro}\\fi}}{loop_macro}"
-                inner = safe_concat(head, body_str)
-                return safe_concat(inner, tail)
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}{body_str}\\expandafter{loop_macro}\\fi}}{loop_macro}"
             else:
-                head = f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}\\else"
-                tail = f"\\expandafter{loop_macro}\\fi}}{loop_macro}"
-                inner = safe_concat(head, body_str)
-                return safe_concat(inner, tail)
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}\\else{body_str}\\expandafter{loop_macro}\\fi}}{loop_macro}"
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
