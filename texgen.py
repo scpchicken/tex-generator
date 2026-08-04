@@ -161,7 +161,6 @@ def _insert_automatic_semicolons(tokens):
                     result.append(('SEMI', ';'))
             continue
         
-        # Trigger ASI before closing braces '}' or adjacent statements on the same line
         if kind in STATEMENT_START_OR_END_KINDS:
             if result and result[-1][0] in ASI_TRIGGER_KINDS:
                 result.append(('SEMI', ';'))
@@ -551,15 +550,18 @@ class TexTranspiler:
         for user_var, tex_var in self.vars.items():
             regs += f"\\newcount{tex_var}"
 
-        helpers = (
-            "\\def\\HP{\\leavevmode\\par}"
-            "\\def\\HS#1#2#3{\\expandafter\\edef\\csname#1:\\the#2\\endcsname{\\the#3}}"
-            "\\def\\HG#1#2#3{\\expandafter\\ifx\\csname#1:\\the#2\\endcsname\\relax#30 \\else#3\\csname#1:\\the#2\\endcsname\\fi}"
-            "\\def\\HL#1{\\e0 \\edef\\HX{\\argv#1\\relax}\\expandafter\\HK\\HX}"
-            "\\def\\HK#1{\\ifx#1\\relax\\else\\advance\\e1 \\expandafter\\HK\\fi}"
-            "\\def\\HV#1#2{\\g#2\\h0 \\f0 \\edef\\HX{\\argv#1\\relax}\\expandafter\\HF\\HX}"
-            "\\def\\HF#1{\\ifx#1\\relax\\else\\ifnum\\h=\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\HF\\fi}"
-        )
+        # Dynamically append only the helper definitions that are actually used in body_code
+        helpers = ""
+        if "\\HP" in body_code:
+            helpers += "\\def\\HP{\\leavevmode\\par}"
+        if "\\HS" in body_code:
+            helpers += "\\def\\HS#1#2#3{\\expandafter\\edef\\csname#1:\\the#2\\endcsname{\\the#3}}"
+        if "\\HG" in body_code:
+            helpers += "\\def\\HG#1#2#3{\\expandafter\\ifx\\csname#1:\\the#2\\endcsname\\relax#30 \\else#3\\csname#1:\\the#2\\endcsname\\fi}"
+        if "\\HL" in body_code:
+            helpers += "\\def\\HL#1{\\e0 \\edef\\HX{\\argv#1\\relax}\\expandafter\\HK\\HX}\\def\\HK#1{\\ifx#1\\relax\\else\\advance\\e1 \\expandafter\\HK\\fi}"
+        if "\\HV" in body_code:
+            helpers += "\\def\\HV#1#2{\\g#2\\h0 \\f0 \\edef\\HX{\\argv#1\\relax}\\expandafter\\HF\\HX}\\def\\HF#1{\\ifx#1\\relax\\else\\ifnum\\h=\g\\f=`#1\\fi\\advance\\h1 \\expandafter\\HF\\fi}"
 
         raw_tex = f"{regs}{helpers}{body_code}"
         return optimize_macros(raw_tex)
@@ -581,7 +583,7 @@ class TexTranspiler:
                 code += f"\\multiply{target_reg}-1 "
                 return code
         elif isinstance(node, VarRef):
-            return f"{target_reg}{self.get_var(node.name)} "
+            return f"{target_reg}{self.get_var(node.name)}"
         elif isinstance(node, ArrayAccessNode):
             idx_reg = self.pick_scratch(current_busy)
             code = self.emit_eval(node.index, idx_reg, current_busy)
@@ -592,7 +594,7 @@ class TexTranspiler:
             self.used_scratch_regs.add("\\e")
             arg_reg = self.pick_scratch(current_busy)
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
-            code += f"\\HL{{{arg_reg}}}{target_reg}\\e "
+            code += f"\\HL{{{arg_reg}}}{target_reg}\\e"
             return code
         elif isinstance(node, ArgvCharNode):
             self.used_scratch_regs.update({"\\f", "\\g", "\\h"})
@@ -600,7 +602,7 @@ class TexTranspiler:
             char_reg = self.pick_scratch(current_busy | {arg_reg})
             code = self.emit_eval(node.arg_idx, arg_reg, current_busy)
             code += self.emit_eval(node.char_idx, char_reg, current_busy | {arg_reg})
-            code += f"\\HV{{{arg_reg}}}{{{char_reg}}}{target_reg}\\f "
+            code += f"\\HV{{{arg_reg}}}{{{char_reg}}}{target_reg}\\f"
             return code
         elif isinstance(node, BinaryOpNode):
             code = self.emit_eval(node.left, target_reg, busy_regs)
@@ -616,15 +618,15 @@ class TexTranspiler:
             code += right_code
             
             if node.op == '+':
-                code += f"\\advance{target_reg}{right_val} "
+                code += f"\\advance{target_reg}{right_val}"
             elif node.op == '-':
-                code += f"\\advance{target_reg}-{right_val} "
+                code += f"\\advance{target_reg}-{right_val}"
             elif node.op == '*':
-                code += f"\\multiply{target_reg}{right_val} "
+                code += f"\\multiply{target_reg}{right_val}"
             elif node.op == '/':
-                code += f"\\divide{target_reg}{right_val} "
+                code += f"\\divide{target_reg}{right_val}"
             elif node.op == '%':
-                code += f"\\d{target_reg}\\divide\\d{right_val}\\multiply\\d{right_val}\\advance{target_reg}-\\d "
+                code += f"\\d{target_reg}\\divide\\d{right_val}\\multiply\\d{right_val}\\advance{target_reg}-\\d"
             return code
 
     def emit_block(self, nodes):
@@ -658,11 +660,11 @@ class TexTranspiler:
             reg = self.pick_scratch()
             code, val = self.emit_operand(node.operand, reg)
             if node.is_char:
-                code += f"\\char{val} "
+                code += f"\\char{val}"
             else:
-                code += f"\\the{val} "
+                code += f"\\the{val}"
             if node.newline:
-                code += "\\HP "
+                code += "\\HP"
             return code
 
         elif isinstance(node, PrintStringNode):
@@ -670,7 +672,7 @@ class TexTranspiler:
             res = []
             for ch in node.text:
                 if ch == '\n':
-                    res.append("\\HP ")
+                    res.append("\\HP")
                 elif ch == ' ':
                     res.append("\\ ")
                 elif ch in TEX_SPECIALS:
@@ -678,7 +680,7 @@ class TexTranspiler:
                 else:
                     res.append(ch)
             if node.newline:
-                res.append("\\HP ")
+                res.append("\\HP")
             return "".join(res)
 
         elif isinstance(node, IfNode):
@@ -688,18 +690,18 @@ class TexTranspiler:
             right_code, right_val = self.emit_operand(node.cond.right, right_reg, {left_reg})
             
             tex_op, inverted = self.OP_MAP[node.cond.op]
-            code = left_code + right_code + f"\\ifnum{left_val}{tex_op}{right_val} "
+            code = left_code + right_code + f"\\ifnum{left_val}{tex_op}{right_val}"
             true_str = self.emit_block(node.true_body)
             false_str = self.emit_block(node.false_body)
             
             if not inverted:
                 code += true_str
                 if false_str:
-                    code += f"\\else {false_str}"
+                    code += f"\\else{false_str}"
             else:
                 code += false_str
-                code += f"\\else {true_str}"
-            code += "\\fi "
+                code += f"\\else{true_str}"
+            code += "\\fi"
             return code
 
         elif isinstance(node, WhileNode):
@@ -713,9 +715,9 @@ class TexTranspiler:
             body_str = self.emit_block(node.body)
             
             if not inverted:
-                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val} {body_str}\\expandafter{loop_macro}\\fi}}{loop_macro} "
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}{body_str}\\expandafter{loop_macro}\\fi}}{loop_macro}"
             else:
-                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}\\else {body_str}\\expandafter{loop_macro}\\fi}}{loop_macro} "
+                return f"\\def{loop_macro}{{{cond_code}\\ifnum{left_val}{tex_op}{right_val}\\else{body_str}\\expandafter{loop_macro}\\fi}}{loop_macro}"
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
